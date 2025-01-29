@@ -241,19 +241,22 @@ public class TalkU extends Application {
             cropRect.setArcHeight(15.0);
             cropRect.setArcWidth(15.0);
 
-            Button retryButton = new Button("  OK  ");
-            retryButton.setPrefHeight(32);
-            retryButton.setMaxHeight(32);
-            retryButton.setMinHeight(32);
+            Button okButton = new Button("  OK  ");
+            okButton.setPrefHeight(32);
+            okButton.setMaxHeight(32);
+            okButton.setMinHeight(32);
 
-            retryButton.setPadding(new Insets(0, 18, 0, 18));
+            okButton.setPadding(new Insets(0, 18, 0, 18));
 
-            retryButton.setStyle(
+            okButton.setStyle(
                     "-fx-background-radius: 10; -fx-background-color: #B81A15; -fx-text-fill: white; -fx-font-size: 17px; -fx-font-weight: 600; -fx-font-family: Calibri;");
 
-            retryButton.setOnAction(event -> {
+            okButton.setOnAction(event -> {
                 dialog.setResult("Retry");
                 dialog.close();
+                Platform.runLater(() -> {
+                    Platform.exit();
+                });
             });
 
             // HBox buttonBox = new HBox(5);
@@ -290,9 +293,9 @@ public class TalkU extends Application {
             Region spacer = new Region();
             VBox.setVgrow(spacer, Priority.ALWAYS);
 
-            retryButton.setAlignment(Pos.BASELINE_RIGHT);
+            okButton.setAlignment(Pos.BASELINE_RIGHT);
 
-            dialogBox.getChildren().addAll(textHbox, spacer, retryButton);
+            dialogBox.getChildren().addAll(textHbox, spacer, okButton);
 
             dialog.setTitle("Error");
             dialog.setWidth(width);
@@ -330,8 +333,7 @@ public class TalkU extends Application {
 
             dialog.initStyle(StageStyle.TRANSPARENT);
             dialog.showAndWait();
-            Platform.exit();
-            return;
+
         }
 
         final Task<VC> createVCTask = new Task<VC>() {
@@ -351,16 +353,18 @@ public class TalkU extends Application {
             });
         });
 
-        vcThread = new Thread(createVCTask);
-        vcThread.setDaemon(true);
-        vcThread.start();
+        if (!alreadyRunning) {
+            vcThread = new Thread(createVCTask);
+            vcThread.setDaemon(true);
+            vcThread.start();
+        }
 
         this.stage = stage;
         stage.setTitle("TalkU");
         stage.setResizable(false);
         stage.initStyle(javafx.stage.StageStyle.TRANSPARENT);
         stage.getIcons().add(new Image("/32.png"));
-        Platform.setImplicitExit(false);
+        Platform.setImplicitExit(alreadyRunning);
 
         colorTransition.setOnFinished(event -> {
             startColor = linearGradient.getStops().get(1).getColor();
@@ -711,7 +715,10 @@ public class TalkU extends Application {
     public static void main(String[] args) {
         System.setProperty("prism.lcdtext", "false");
         launch();
-        vcThread.interrupt();
+        if (vcThread != null) {
+
+            vcThread.interrupt();
+        }
         if (vc != null) {
             vc.close();
         }
