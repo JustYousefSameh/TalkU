@@ -9,11 +9,15 @@ Join Discord at [TalkU](https://discord.gg/kqY7dM7ekJ)
 
 - Valorant
 
+## Help Needed: Icon Design
+
+### We are looking for a creative and visually appealing icon for TalkU! If you have design skills and would like to contribute, feel free to reach out or submit your design ideas. Any help is greatly appreciated!
+
 ## Roadmap
 
 - Better VPN servers
 - Support more games
-- Better portocol
+- Better protocol
 - Memory Optimiztion
 
 ## Contributing
