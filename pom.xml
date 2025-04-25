@@ -1,34 +1,37 @@
-<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-  xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/maven-v4_0_0.xsd">
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/maven-v4_0_0.xsd">
   <modelVersion>4.0.0</modelVersion>
   <groupId>org.openjfx</groupId>
   <artifactId>TalkU</artifactId>
   <packaging>jar</packaging>
-  <version>1.0</version>
+  <version>2.0</version>
   <name>TalkU</name>
   <url>http://maven.apache.org</url>
-
-  	<repositories>
-		<repository>
-		    <id>jitpack.io</id>
-		    <url>https://jitpack.io</url>
-		</repository>
-<repository>
-    <id>poolborges-github-thirdparty</id>
-    <name>poolborges-github</name>
-    <url>https://github.com/poolborges/maven/raw/master/thirdparty/</url>
-</repository>
-	</repositories>
-
+  <repositories>
+    <repository>
+      <id>jitpack.io</id>
+      <url>https://jitpack.io</url>
+    </repository>
+    <repository>
+      <id>poolborges-github-thirdparty</id>
+      <name>poolborges-github</name>
+      <url>https://github.com/poolborges/maven/raw/master/thirdparty/</url>
+    </repository>
+  </repositories>
   <properties>
+    <maven.compiler.source>20</maven.compiler.source>
+    <maven.compiler.target>20</maven.compiler.target>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <javafx.maven.plugin.version>0.0.8</javafx.maven.plugin.version>
     <os-classifier>win</os-classifier>
     <forceUploadingPainter>true</forceUploadingPainter>
   </properties>
-
   <dependencies>
 <dependency>
+    <groupId>org.openjfx</groupId>
+    <artifactId>javafx-swing</artifactId>
+    <version>21</version>
+</dependency>
+    <dependency>
       <groupId>org.openjfx</groupId>
       <artifactId>javafx-graphics</artifactId>
       <version>21</version>
@@ -39,14 +42,9 @@
       <version>21</version>
     </dependency>
     <dependency>
-      <groupId>org.apache.commons</groupId>
-      <artifactId>commons-csv</artifactId>
-      <version>1.8</version>
-    </dependency>
-    <dependency>
-      <groupId>com.profesorfalken</groupId>
-      <artifactId>jPowerShell</artifactId>
-      <version>3.1.1</version>
+      <groupId>org.openjfx</groupId>
+      <artifactId>javafx-fxml</artifactId>
+      <version>21</version>
     </dependency>
     <dependency>
       <groupId>com.github.hervegirod</groupId>
@@ -58,61 +56,93 @@
       <artifactId>fontawesomefx-fontawesome</artifactId>
       <version>4.7.0-9.1.2</version>
     </dependency>
-<dependency>
-    <groupId>it.sauronsoftware</groupId>
-    <artifactId>junique</artifactId>
-    <version>1.0.4</version>
-    <type>jar</type>
-</dependency>
-<dependency>
-    <groupId>de.jensd</groupId>
-    <artifactId>fontawesomefx-materialicons</artifactId>
-    <version>2.2.0-9.1.2</version>
-</dependency>
-<dependency>
-    <groupId>de.jensd</groupId>
-    <artifactId>fontawesomefx-materialdesignfont</artifactId>
-    <version>2.0.26-9.1.2</version>
-</dependency>
-<dependency>
-    <groupId>io.vavr</groupId>
-    <artifactId>vavr</artifactId>
-    <version>0.10.3</version> <!-- Use the latest version available -->
-</dependency>
-
+    <dependency>
+      <groupId>it.sauronsoftware</groupId>
+      <artifactId>junique</artifactId>
+      <version>1.0.4</version>
+      <type>jar</type>
+    </dependency>
+    <dependency>
+      <groupId>de.jensd</groupId>
+      <artifactId>fontawesomefx-materialicons</artifactId>
+      <version>2.2.0-9.1.2</version>
+    </dependency>
+    <dependency>
+      <groupId>io.vavr</groupId>
+      <artifactId>vavr</artifactId>
+      <version>0.10.3</version>
+    </dependency>
+    <dependency>
+      <groupId>net.java.dev.jna</groupId>
+      <artifactId>jna</artifactId>
+      <version>5.12.1</version>
+    </dependency>
+    <dependency>
+      <groupId>net.java.dev.jna</groupId>
+      <artifactId>jna-platform</artifactId>
+      <version>5.17.0</version>
+    </dependency>
+    <dependency>
+      <groupId>com.fasterxml.jackson.core</groupId>
+      <artifactId>jackson-databind</artifactId>
+      <version>2.19.0-rc2</version>
+    </dependency>
   </dependencies>
-  
- <build>
+  <build>
     <plugins>
       <plugin>
         <groupId>org.openjfx</groupId>
         <artifactId>javafx-maven-plugin</artifactId>
         <version>${javafx.maven.plugin.version}</version>
-            <configuration>
-              <mainClass>com.talku.Main</mainClass>
-            </configuration>
-      </plugin>
-      <plugin>
-    <groupId>org.apache.maven.plugins</groupId>
-    <artifactId>maven-shade-plugin</artifactId>
-    <version>3.4.0</version>
-    <executions>
-      <execution>
-        <phase>package</phase>
-        <goals>
-          <goal>shade</goal>
-        </goals>
         <configuration>
-          <transformers>
-            <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
-              <mainClass> com.talku.Main </mainClass>
-            </transformer>
-          </transformers>
+          <mainClass>com.talku.Main</mainClass>
+          <compress>2</compress>
+          <noHeaderFiles>true</noHeaderFiles>
+          <noManPages>true</noManPages>
+          <stripDebug>true</stripDebug>
+          <launcher>TalkU</launcher>
         </configuration>
-      </execution>
-    </executions>
-</plugin>
+      </plugin>
+      <!-- <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-dependency-plugin</artifactId>
+        <version>3.8.1</version>
+        <executions>
+          <execution>
+            <id>copy-dependencies</id>
+            <phase>package</phase>
+            <goals>
+              <goal>copy-dependencies</goal>
+            </goals>
+            <configuration>
+              <outputDirectory>${project.build.directory}/lib</outputDirectory>
+              <overWriteReleases>false</overWriteReleases>
+              <overWriteSnapshots>false</overWriteSnapshots>
+              <overWriteIfNewer>true</overWriteIfNewer>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin> -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-shade-plugin</artifactId>
+        <version>3.4.0</version>
+        <executions>
+          <execution>
+            <phase>package</phase>
+            <goals>
+              <goal>shade</goal>
+            </goals>
+            <configuration>
+              <transformers>
+                <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+                  <mainClass>com.talku.Main</mainClass>
+                </transformer>
+              </transformers>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
     </plugins>
   </build>
-  
 </project>

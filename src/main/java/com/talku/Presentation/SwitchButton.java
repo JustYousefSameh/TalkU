@@ -1,4 +1,4 @@
-package com.talku;
+package com.talku.Presentation;
 
 import de.jensd.fx.glyphs.fontawesome.FontAwesomeIcon;
 import de.jensd.fx.glyphs.fontawesome.FontAwesomeIconView;
@@ -176,7 +176,7 @@ public class SwitchButton extends StackPane {
         buttonTranslateTransition.play();
 
         state = false;
-        // isClickable = true;
+
     }
 
     public SwitchButton() {
@@ -207,19 +207,6 @@ public class SwitchButton extends StackPane {
                 rotationTransition.play();
                 widthTransition.play();
             }
-            // if (!state) {
-            // back.setFill(backConnectingColor);
-            // buttonCircle.setFill(buttonCircleConnecting);
-            // buttonStack.getChildren().set(1, loadingIcon);
-            // buttonTranslateTransition.setToX(0);
-            // buttonTranslateTransition.play();
-
-            // rotationTransition.play();
-            // widthTransition.play();
-            // } else {
-            // // function.run();
-            // disable();
-            // }
         };
 
         setOnMouseEntered(e -> {

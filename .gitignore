@@ -1,4 +1,6 @@
 target/
+runtime/
+input/
 .vscode/
 pom.xml.tag
 pom.xml.releaseBackup

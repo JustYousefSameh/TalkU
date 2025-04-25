@@ -1,4 +1,4 @@
-package com.talku;
+package com.talku.Presentation;
 
 import de.jensd.fx.glyphs.materialicons.MaterialIcon;
 import de.jensd.fx.glyphs.materialicons.MaterialIconView;
