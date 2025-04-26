@@ -7,7 +7,8 @@ https://github.com/user-attachments/assets/ec66194d-843e-475c-8514-dab902e46435
 
 # How it works
 TalkU uses [wireguard](https://www.wireguard.com/) protocol
-and [wstunnel](https://github.com/erebe/wstunnel) for obfuscation
+and [wstunnel](https://github.com/erebe/wstunnel) for obfuscation <br>
+It only routes VOIP connections so it doesn't affect your ping
 
 # Supported Games
 #### Any game that uses VIVOX service like:
