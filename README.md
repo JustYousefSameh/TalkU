@@ -14,7 +14,6 @@ It only routes VOIP connections so it doesn't affect your ping
 #### Any game that uses VIVOX service like:
 - Valorant
 - Overwatch 2
-- Rainbow Six Siege
 - League Of Legends
 - Foxhole
 - Ready or Not
