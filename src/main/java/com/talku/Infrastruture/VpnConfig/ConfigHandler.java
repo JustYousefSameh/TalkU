@@ -30,9 +30,10 @@ public class ConfigHandler {
     private static String apiURL = "https://talku.ddns.net:8000/exchangekeys/";
 
     /*
-     * API key for the server. This should be kept secret and not hardcoded in the
-     * code. In a real application, you would want to store this securely and
-     * retrieve it at runtime.
+     * API key for the server.
+     * I am aware it shows in the source code
+     * Doesn't really matter if you know the api key or not
+     * I took other security measures
      */
 
     private static String apiKey = "z~WXkukTav2^dodr5#9";
