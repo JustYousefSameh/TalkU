@@ -4,46 +4,24 @@ import java.awt.SystemTray;
 import java.awt.Toolkit;
 import java.awt.TrayIcon;
 import java.net.URL;
-import java.util.Optional;
 
 import com.talku.Controller.TalkUController;
 import com.talku.Controller.TalkUController.VCException;
 import com.talku.Infrastruture.Wireguard.WireGuardTunnelService;
 
-import de.jensd.fx.glyphs.materialicons.MaterialIcon;
-import de.jensd.fx.glyphs.materialicons.MaterialIconView;
 import io.vavr.control.Either;
 import it.sauronsoftware.junique.AlreadyLockedException;
 import it.sauronsoftware.junique.JUnique;
-import javafx.animation.FadeTransition;
-import javafx.animation.ScaleTransition;
-import javafx.animation.TranslateTransition;
 import javafx.application.Application;
 import javafx.application.Platform;
-import javafx.geometry.Insets;
 import javafx.geometry.Pos;
 import javafx.scene.Scene;
-import javafx.scene.control.Button;
-import javafx.scene.control.Dialog;
-import javafx.scene.control.DialogPane;
 import javafx.scene.image.Image;
-import javafx.scene.input.MouseButton;
-import javafx.scene.input.MouseEvent;
-import javafx.scene.layout.Background;
-import javafx.scene.layout.BackgroundFill;
-import javafx.scene.layout.CornerRadii;
-import javafx.scene.layout.HBox;
-import javafx.scene.layout.Priority;
-import javafx.scene.layout.Region;
 import javafx.scene.layout.StackPane;
 import javafx.scene.layout.VBox;
 import javafx.scene.paint.Color;
 import javafx.scene.shape.Rectangle;
-import javafx.scene.text.FontSmoothingType;
-import javafx.scene.text.Text;
 import javafx.stage.Stage;
-import javafx.stage.StageStyle;
-import javafx.util.Duration;
 
 public class TalkU extends Application {
     private Stage stage;
@@ -133,13 +111,16 @@ public class TalkU extends Application {
         VBox mainVBox = new VBox(80);
         mainVBox.setAlignment(Pos.CENTER);
 
+        VersionViewer versionViewer = new VersionViewer("v2.2");
+        StackPane.setAlignment(versionViewer, Pos.BOTTOM_RIGHT);
+
         TitleBar titleBar = new TitleBar(stage);
         GradientBackgroundWithImage gradientBackgroundWithImage = new GradientBackgroundWithImage();
 
         StackPane applicationStackPane = new StackPane();
         StackPane.setAlignment(titleBar, Pos.TOP_CENTER);
         applicationStackPane.getChildren().addAll(gradientBackgroundWithImage, mainVBox, discordButton, githubButton,
-                titleBar);
+                titleBar, versionViewer);
         applicationStackPane.setClip(rect);
 
         Scene scene = new Scene(applicationStackPane, 450, 400);

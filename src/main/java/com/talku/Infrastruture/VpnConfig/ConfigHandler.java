@@ -98,23 +98,23 @@ public class ConfigHandler {
      * Get default gateway for the system (e.g 192.168.0.1 or 192.168.1.1) important
      * for routing
      */
+    
+    // Used a new method to get the default gateway to avoid virtual adapters gateway (e.g. RadminVpn or Hamachi)
     static private Either<ConfigException, String> getGateway() {
         try {
-            ProcessBuilder builder = new ProcessBuilder("netstat", "-rn");
+            ProcessBuilder builder = new ProcessBuilder("powershell", "-Command",
+                "Get-NetRoute -DestinationPrefix '0.0.0.0/0' | Sort-Object RouteMetric | Select-Object -First 1 -ExpandProperty NextHop");
             Process process = builder.start();
 
             BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()));
-            String line;
-
-            while ((line = reader.readLine()) != null) {
-                if (line.contains("0.0.0.0") || line.startsWith("default")) {
-                    String[] parts = line.trim().split("\\s+");
-                    if (parts.length >= 3) {
-                        System.out.println("Default Gateway: " + parts[2]);
-                        return Either.right(parts[2]);
-                    }
-                }
+            String line = reader.readLine();
+ 
+            if (line != null && !line.isEmpty()) {
+                String gateway = line.trim();
+                System.out.println("Default Gateway: " + gateway);
+                return Either.right(gateway);
             }
+
             System.out.println("No default gateway found.");
             return Either.left(new ConfigException("No default gateway found."));
 
@@ -148,8 +148,9 @@ public class ConfigHandler {
         config.append("DNS = ").append(serverConfig.getDns()).append("\n");
 
         // PostUp starts wstunnel and route traffic to it
+        // Added "" at wstunnelPath to fix space issue in path
         config.append("PostUp = ").append(String.format(
-                "route add %1$s mask 255.255.255.255 %2$s && start \"\" %5$s client  -L \"udp://%3$s:localhost:%3$s?timeout_sec=0\" wss://%1$s:%4$s",
+                "route add %1$s mask 255.255.255.255 %2$s && start \"\" \"%5$s\" client  -L \"udp://%3$s:localhost:%3$s?timeout_sec=0\" wss://%1$s:%4$s",
                 remoteIp, gateway, wstunnelPort, wstunnelRemotePort, wstunnelPath)).append("\n");
 
         // PostDown stops wstunnel and removes the route
