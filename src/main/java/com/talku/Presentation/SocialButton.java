@@ -12,7 +12,9 @@ import javafx.scene.control.Button;
 import javafx.scene.image.Image;
 import javafx.scene.image.ImageView;
 import javafx.scene.layout.Background;
+import javafx.scene.layout.BackgroundFill;
 import javafx.scene.layout.StackPane;
+import javafx.scene.paint.Color;
 import javafx.scene.transform.Scale;
 import javafx.util.Duration;
 
@@ -20,21 +22,18 @@ public class SocialButton extends Button {
 
     public static SocialButton discordButton() {
         SocialButton button = new SocialButton("https://discord.gg/mph7jETDv9", "/discord.png", 32);
-        button.setTranslateX(-5);
-        button.setTranslateY(5);
         return button;
     }
 
     public static SocialButton githubButton() {
         SocialButton button = new SocialButton("https://github.com/JustYousefSameh/TalkU", "/github.png", 30);
-        button.setTranslateX(40);
-        button.setTranslateY(4);
         return button;
     }
 
     private String socialUrl;
 
-    // Used scale animation instead of the old one cuz people thought it was bugged for some reason >:(
+    // Used scale animation instead of the old one cuz people thought it was bugged
+    // for some reason >:(
     private ScaleTransition socialTransition = new ScaleTransition(Duration.millis(300), this);
 
     private SocialButton(String url, String iconPath, int size) {
@@ -46,7 +45,7 @@ public class SocialButton extends Button {
         socialUrl = url;
 
         setPrefHeight(60);
-        setPrefWidth(60);
+        // setPrefWidth(size);
         setBackground(Background.EMPTY);
 
         StackPane.setAlignment(this, Pos.BOTTOM_LEFT);

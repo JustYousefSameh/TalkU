@@ -1,0 +1,54 @@
+/* Make the panel + viewport transparent and rounded */
+.games-scroll {
+    -fx-background-color: transparent;
+    -fx-background-insets: 0;
+    -fx-padding: 4;
+    -fx-border-color: rgba(255,255,255,0.12);
+    -fx-border-radius: 8;
+    -fx-background-radius: 8;
+}
+.games-scroll > .viewport {
+    -fx-background-color: transparent;
+}
+.games-scroll .scroll-bar{
+    -fx-background-color: transparent;
+}
+/* Minimal modern scrollbars */
+/* .games-scroll .scroll-bar:vertical,
+.games-scroll .scroll-bar:horizontal {
+    -fx-background-color: transparent;
+    -fx-padding: 4;
+} */
+
+.games-scroll .track {
+    -fx-background-color: rgba(255,255,255,0.12);
+    -fx-background-insets: 4;
+    -fx-background-radius: 8;
+}
+
+.games-scroll .thumb {
+    -fx-background-color: grey;
+    -fx-background-insets: 2;
+    -fx-background-radius: 8;
+}
+
+.games-scroll .thumb:hover {
+    -fx-background-color: grey;
+}
+
+/* Hide the arrow buttons */
+.games-scroll .increment-button,
+.games-scroll .decrement-button {
+    -fx-background-color: transparent;
+    -fx-padding: 0;
+}
+.games-scroll .increment-arrow,
+.games-scroll .decrement-arrow {
+    -fx-shape: "";
+    -fx-padding: 0;
+}
+
+/* Hide the corner square */
+.games-scroll .corner {
+    -fx-background-color: transparent;
+}

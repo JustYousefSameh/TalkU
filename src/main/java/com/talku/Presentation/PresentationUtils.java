@@ -236,9 +236,7 @@ public class PresentationUtils {
 
         Optional<String> action = dialog.showAndWait();
         if (action.get() == "Retry") {
-            MouseEvent mouseEvent = new MouseEvent(MouseEvent.MOUSE_CLICKED, 1, 2, 3, 4, MouseButton.PRIMARY, 1, true,
-                    true, true, true, true, true, true, true, true, true, null);
-            switchButton.fireEvent(mouseEvent);
+            switchButton.simulateClick();
         }
 
     }

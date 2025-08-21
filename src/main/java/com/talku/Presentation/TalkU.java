@@ -7,27 +7,45 @@ import java.net.URL;
 
 import com.talku.Controller.TalkUController;
 import com.talku.Controller.TalkUController.VCException;
+import com.talku.Infrastruture.AppSettings.SettingsManager;
+import com.talku.Infrastruture.WinService.ProcessWatcher;
 import com.talku.Infrastruture.Wireguard.WireGuardTunnelService;
 
 import io.vavr.control.Either;
-import it.sauronsoftware.junique.AlreadyLockedException;
-import it.sauronsoftware.junique.JUnique;
+import javafx.animation.ScaleTransition;
+import javafx.animation.TranslateTransition;
 import javafx.application.Application;
 import javafx.application.Platform;
 import javafx.geometry.Pos;
 import javafx.scene.Scene;
 import javafx.scene.image.Image;
+import javafx.scene.layout.BorderPane;
+import javafx.scene.layout.HBox;
+import javafx.scene.layout.Priority;
+import javafx.scene.layout.Region;
 import javafx.scene.layout.StackPane;
 import javafx.scene.layout.VBox;
 import javafx.scene.paint.Color;
 import javafx.scene.shape.Rectangle;
 import javafx.stage.Stage;
+import javafx.util.Duration;
 
 public class TalkU extends Application {
-    private Stage stage;
+    static private Stage stage;
 
-    private void showStage() {
+    private ActiveCount activeCount;
+    private SettingsMenu settingsMenu;
+
+    static public void showStage() {
+        System.out.println("Showing stage");
         stage.show();
+
+        // A hack to ensure the stage is on top
+        if (!stage.isIconified()) {
+            stage.setIconified(true);
+        }
+
+        stage.setIconified(false);
         stage.toFront();
     }
 
@@ -43,10 +61,14 @@ public class TalkU extends Application {
             final TrayIcon trayIcon = new TrayIcon(image, "TalkU");
             final SystemTray tray = SystemTray.getSystemTray();
 
-            trayIcon.addActionListener(event -> Platform.runLater(this::showStage));
+            trayIcon.addActionListener(event -> Platform.runLater(() -> {
+                showStage();
+            }));
 
             java.awt.MenuItem openItem = new java.awt.MenuItem("Show");
-            openItem.addActionListener(event -> Platform.runLater(this::showStage));
+            openItem.addActionListener(event -> Platform.runLater(() -> {
+                showStage();
+            }));
 
             java.awt.MenuItem exitItem = new java.awt.MenuItem("Exit");
             exitItem.addActionListener(event -> {
@@ -70,71 +92,104 @@ public class TalkU extends Application {
     @Override
     public void start(Stage stage) {
 
-        String appId = "TalkU";
+        Platform.setImplicitExit(false);
 
-        boolean alreadyRunning;
-        try {
-            JUnique.acquireLock(appId);
-            alreadyRunning = false;
-        } catch (AlreadyLockedException e) {
-            alreadyRunning = true;
-        }
-
-        // Show a dialog to inform the user that the app is already running
-        if (alreadyRunning) {
-            // Not the best way as it loads javafx just to show the error, but I want the
-            // error to look good so I'm leaving it
-            PresentationUtils.showAppAlreadyRunningDialog();
-        }
-
-        if (!alreadyRunning)
-            addAppToTray();
-
-        this.stage = stage;
+        TalkU.stage = stage;
         stage.setTitle("TalkU");
         stage.setResizable(false);
         stage.initStyle(javafx.stage.StageStyle.TRANSPARENT);
         stage.getIcons().add(new Image("/32.png"));
 
-        // when set to false Prevents the app from closing when the last window is
-        // closed (Important for tray)
-        // If app is alraedy running then we need to be able to close the app
-        Platform.setImplicitExit(alreadyRunning);
-
         Rectangle rect = new Rectangle(450, 400);
         rect.setArcHeight(15.0);
         rect.setArcWidth(15.0);
 
+        HBox bottomBar = new HBox();
+        bottomBar.setMaxHeight(10);
+        bottomBar.setAlignment(Pos.BOTTOM_CENTER);
+
+        Region spacer = new Region();
+        HBox.setHgrow(spacer, Priority.ALWAYS);
+
+        StackPane.setAlignment(bottomBar, Pos.BOTTOM_CENTER);
+
         SocialButton githubButton = SocialButton.githubButton();
         SocialButton discordButton = SocialButton.discordButton();
 
-        VBox mainVBox = new VBox(80);
-        mainVBox.setAlignment(Pos.CENTER);
+        BorderPane mainVBox = new BorderPane();
 
-        VersionViewer versionViewer = new VersionViewer("v2.2");
-        StackPane.setAlignment(versionViewer, Pos.BOTTOM_RIGHT);
+        activeCount = new ActiveCount();
 
-        TitleBar titleBar = new TitleBar(stage);
-        GradientBackgroundWithImage gradientBackgroundWithImage = new GradientBackgroundWithImage();
+        TranslateTransition openingSlideUp = new TranslateTransition();
+        openingSlideUp.setDuration(Duration.millis(600));
+        openingSlideUp.setNode(bottomBar);
+        openingSlideUp.setFromY(30);
+        openingSlideUp.setToY(-5);
+        openingSlideUp.setInterpolator(PresentationUtils.easeInOutBack);
+
+        bottomBar.getChildren().addAll(discordButton, githubButton, spacer, activeCount);
 
         StackPane applicationStackPane = new StackPane();
+
+        TitleBar titleBar = new TitleBar(stage, () -> {
+
+            if (settingsMenu == null) {
+                settingsMenu = new SettingsMenu(
+                        // pass runnable to remove the settings menu from the tree on close
+                        () -> {
+                            if (settingsMenu != null) {
+                                applicationStackPane.getChildren().remove(settingsMenu);
+                                settingsMenu = null;
+                            }
+                        });
+                applicationStackPane.getChildren().add(settingsMenu);
+            } else {
+                // Call close menu on existing settings menu to trigger the animation
+                settingsMenu.closeMenu();
+            }
+
+        });
         StackPane.setAlignment(titleBar, Pos.TOP_CENTER);
-        applicationStackPane.getChildren().addAll(gradientBackgroundWithImage, mainVBox, discordButton, githubButton,
-                titleBar, versionViewer);
+
+        TranslateTransition slideDownTitleBar = new TranslateTransition();
+        slideDownTitleBar.setNode(titleBar);
+        slideDownTitleBar.setDuration(Duration.millis(600));
+        slideDownTitleBar.setFromY(-30);
+        slideDownTitleBar.setToY(0);
+        slideDownTitleBar.setInterpolator(PresentationUtils.easeInOutBack);
+
+        GradientBackgroundWithImage gradientBackgroundWithImage = new GradientBackgroundWithImage();
+
+        applicationStackPane.getChildren().addAll(gradientBackgroundWithImage, mainVBox);
         applicationStackPane.setClip(rect);
 
         Scene scene = new Scene(applicationStackPane, 450, 400);
         scene.setFill(Color.TRANSPARENT);
 
         AnimatedText animatedText = new AnimatedText();
+
         SwitchButton switchButton = new SwitchButton();
+        ScaleTransition openingScaleTransition = new ScaleTransition();
+        openingScaleTransition.setNode(switchButton);
+        openingScaleTransition.setDuration(Duration.millis(600));
+        openingScaleTransition.setFromX(0);
+        openingScaleTransition.setFromY(0);
+        openingScaleTransition.setToX(1);
+        openingScaleTransition.setToY(1);
+        openingScaleTransition.setInterpolator(PresentationUtils.easeInOutBack);
 
         ScalingCircle scalingCircle = new ScalingCircle();
         StackPane buttonAndCircle = new StackPane();
 
         buttonAndCircle.getChildren().addAll(scalingCircle, switchButton);
 
-        mainVBox.getChildren().addAll(animatedText, buttonAndCircle);
+        VBox statusWithButtom = new VBox(animatedText, buttonAndCircle);
+        statusWithButtom.setAlignment(Pos.CENTER);
+        statusWithButtom.setSpacing(80);
+
+        mainVBox.setCenter(statusWithButtom);
+        mainVBox.setTop(titleBar);
+        mainVBox.setBottom(bottomBar);
 
         Runnable onButtonClick = () -> {
 
@@ -166,11 +221,14 @@ public class TalkU extends Application {
                     javafx.application.Platform.runLater(() -> {
                         if (isConnected) {
                             switchButton.enable();
+                            activeCount.setUserEffectiveCount(1);
 
                             animatedText.setText("Connected");
                             gradientBackgroundWithImage.connected();
                             scalingCircle.animate();
                         } else {
+                            activeCount.setUserEffectiveCount(0);
+
                             // No need to call diasble as it happens automatically from the switch button
                             // Because disconnecting is instant no need to wait for confirmation
                             switchButton.setIsClickable(true);
@@ -181,8 +239,30 @@ public class TalkU extends Application {
         };
         switchButton.setOnAction(onButtonClick);
 
+        showStage();
         stage.setScene(scene);
-        stage.show();
+
+        javax.swing.SwingUtilities.invokeLater(this::addAppToTray);
+
+        openingScaleTransition.play();
+        openingSlideUp.play();
+        slideDownTitleBar.play();
+
+        animatedText.setText("Disconnected");
+
+        var processWatcher = ProcessWatcher.init(switchButton);
+
+        if (SettingsManager.getInstance().getConfig().isAutoConnectOnGameLaunch()) {
+            processWatcher.startWatching();
+        }
+
+    }
+
+    @Override
+    public void stop() throws Exception {
+        activeCount.close();
+        ProcessWatcher.getInstance().stopWatching();
+        super.stop();
     }
 
     public static void main(String[] args) {

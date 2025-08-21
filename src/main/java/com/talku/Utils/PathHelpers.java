@@ -35,7 +35,7 @@ public class PathHelpers {
     public static String getLogPath() {
         String jarPath = getJarPath();
         String jarDir = jarPath.substring(0, jarPath.lastIndexOf("\\"));
-        String logPath = jarDir + "\\log.bin"; 
+        String logPath = jarDir + "\\log.bin";
         return logPath;
     }
 
@@ -53,5 +53,12 @@ public class PathHelpers {
         String jarDir = jarPath.substring(0, jarPath.lastIndexOf("\\"));
         String wireguardDllpath = jarDir + "\\wireguard.dll";
         return wireguardDllpath;
+    }
+
+    public static String getAppConfigPath() {
+        String jarPath = getJarPath();
+        String jarDir = jarPath.substring(0, jarPath.lastIndexOf("\\"));
+        String appConfigPath = jarDir + "\\config.json";
+        return appConfigPath;
     }
 }

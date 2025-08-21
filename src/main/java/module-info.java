@@ -1,8 +1,8 @@
 module talku {
     // JavaFX
     requires javafx.base;
-    requires javafx.controls;
     requires javafx.graphics;
+    requires javafx.controls;
     requires javafx.fxml;
     requires javafx.swing;
 
@@ -22,7 +22,6 @@ module talku {
     requires org.girod.javafx.svgimage;
     requires de.jensd.fx.glyphs.commons;
     requires de.jensd.fx.glyphs.materialicons;
-    requires junique;
     requires com.sun.jna;
     requires com.sun.jna.platform;
 
@@ -32,6 +31,7 @@ module talku {
     exports com.talku.Infrastruture.VpnConfig;
     exports com.talku.Infrastruture.WinService;
     exports com.talku.Infrastruture.Wireguard;
+    exports com.talku.Infrastruture.AppSettings;
     exports com.talku.Utils;
 
 }

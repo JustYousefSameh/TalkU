@@ -44,7 +44,6 @@ public class TalkUController {
     private static int retryCount = 0;
 
     public static Either<VCException, Boolean> connect(Boolean isConnected) {
-
         // Adding the registry key to allow script execution (Postup and Postdown in
         // wireguard config)
         // This only needs to run one time

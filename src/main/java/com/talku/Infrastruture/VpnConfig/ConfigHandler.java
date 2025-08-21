@@ -11,6 +11,7 @@ import java.net.http.HttpRequest.BodyPublishers;
 import java.net.http.HttpResponse;
 
 import com.fasterxml.jackson.core.JsonParser.Feature;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.talku.Controller.TalkUController.VCException;
 import com.talku.Infrastruture.VpnConfig.ConfigModels.ServerConfig;
@@ -27,13 +28,11 @@ public class ConfigHandler {
         getConfigAndWriteToFile();
     }
 
-    private static String apiURL = "https://talku.ddns.net:8000/exchangekeys/";
+    private static String apiURL = "https://talku.ddns.net:8000/";
 
     /*
-     * API key for the server.
-     * I am aware it shows in the source code
-     * Doesn't really matter if you know the api key or not
-     * I took other security measures
+     * API key for the server. I am aware it shows in the source code Doesn't really
+     * matter if you know the api key or not I took other security measures
      */
 
     private static String apiKey = "z~WXkukTav2^dodr5#9";
@@ -42,6 +41,28 @@ public class ConfigHandler {
         public ConfigException(String message) {
             super(message);
         }
+    }
+
+    public static Either<ConfigException, Integer> getConnectedUsersCount() {
+        try {
+            HttpClient client = HttpClient.newHttpClient();
+            HttpRequest request = HttpRequest.newBuilder().uri(new URI(apiURL + "connected_users/"))
+                    .header("Content-Type", "application/json").version(HttpClient.Version.HTTP_1_1).GET().build();
+
+            HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
+
+            ObjectMapper mapper = new ObjectMapper();
+            JsonNode node = mapper.readTree(response.body());
+
+            int connectedUsers = node.get("connected_users").asInt();
+            return Either.right(connectedUsers);
+
+        } catch (Exception e) {
+            System.out.println("Error getting connected users count: " + e.getMessage());
+
+            return Either.left(new ConfigException("Failed to get connected users count."));
+        }
+
     }
 
     public static Either<ConfigException, Void> getConfigAndWriteToFile() {
@@ -79,11 +100,12 @@ public class ConfigHandler {
             System.out.println(json);
 
             HttpClient client = HttpClient.newHttpClient();
-            HttpRequest request = HttpRequest.newBuilder().uri(new URI(apiURL))
+            HttpRequest request = HttpRequest.newBuilder().uri(new URI(apiURL + "exchange_keys/"))
                     .header("Content-Type", "application/json").version(HttpClient.Version.HTTP_1_1)
                     .POST(BodyPublishers.ofString(json)).build();
 
             HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
+
             // TODO: auto redirect on code 307
             ServerConfig serverConfig = mapper.readValue(response.body(), ServerConfig.class);
             return Either.right(Tuple.of(serverConfig, privateKey));
@@ -98,17 +120,18 @@ public class ConfigHandler {
      * Get default gateway for the system (e.g 192.168.0.1 or 192.168.1.1) important
      * for routing
      */
-    
-    // Used a new method to get the default gateway to avoid virtual adapters gateway (e.g. RadminVpn or Hamachi)
+
+    // Used a new method to get the default gateway to avoid virtual adapters
+    // gateway (e.g. RadminVpn or Hamachi)
     static private Either<ConfigException, String> getGateway() {
         try {
             ProcessBuilder builder = new ProcessBuilder("powershell", "-Command",
-                "Get-NetRoute -DestinationPrefix '0.0.0.0/0' | Sort-Object RouteMetric | Select-Object -First 1 -ExpandProperty NextHop");
+                    "Get-NetRoute -DestinationPrefix '0.0.0.0/0' | Sort-Object RouteMetric | Select-Object -First 1 -ExpandProperty NextHop");
             Process process = builder.start();
 
             BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()));
             String line = reader.readLine();
- 
+
             if (line != null && !line.isEmpty()) {
                 String gateway = line.trim();
                 System.out.println("Default Gateway: " + gateway);

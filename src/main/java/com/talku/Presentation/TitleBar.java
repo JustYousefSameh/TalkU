@@ -4,11 +4,14 @@ import de.jensd.fx.glyphs.materialicons.MaterialIcon;
 import de.jensd.fx.glyphs.materialicons.MaterialIconView;
 import javafx.event.ActionEvent;
 import javafx.geometry.Pos;
+import javafx.scene.Cursor;
+import javafx.scene.Node;
 import javafx.scene.control.Button;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
 import javafx.scene.layout.Region;
 import javafx.scene.paint.Color;
+import javafx.scene.shape.Rectangle;
 import javafx.scene.text.Font;
 import javafx.scene.text.FontSmoothingType;
 import javafx.scene.text.Text;
@@ -19,9 +22,12 @@ class Delta {
 }
 
 class TitleBar extends HBox {
-    public TitleBar(Stage stage) {
+    public TitleBar(Stage stage, Runnable toggleSettings) {
         final int height = 35;
         final int size = 20;
+
+        setSpacing(4);
+        setPadding(new javafx.geometry.Insets(0, 8, 0, 8));
 
         final Color color = Color.valueOf("#CFCFCF");
 
@@ -31,28 +37,40 @@ class TitleBar extends HBox {
         closeImage.setGlyphSize(size);
         closeImage.setFill(color);
 
+        Button closeBtn = new Button("", closeImage);
+
         MaterialIconView minimizeImage = new MaterialIconView(MaterialIcon.REMOVE);
         minimizeImage.setFontSmoothingType(FontSmoothingType.GRAY);
         minimizeImage.setGlyphSize(size);
         minimizeImage.setFill(color);
 
-        Button closeBtn = new Button("", closeImage);
         Button minimizeBtn = new Button("", minimizeImage);
 
+        MaterialIconView settingsImage = new MaterialIconView(MaterialIcon.SETTINGS);
+        settingsImage.setFontSmoothingType(FontSmoothingType.GRAY);
+        settingsImage.setGlyphSize(size);
+        settingsImage.setFill(color);
+
+        Button settingsBtn = new Button("", settingsImage);
+
         Text labelName = new Text("TalkU");
+
+        VersionViewer versionViewer = new VersionViewer("v2.3");
+        versionViewer.setTranslateY(-1);
 
         Font talkuFont = Font.loadFont(getClass().getResourceAsStream("/Roboto-Regular.ttf"), 13);
         labelName.setFont(talkuFont);
         labelName.setFill(color);
         labelName.setFontSmoothingType(FontSmoothingType.GRAY);
-        labelName.setTranslateX(10);
         labelName.setTranslateY(-2);
-
-        Region paddingRegion = new Region();
-        paddingRegion.setPrefWidth(5);
 
         closeBtn.setStyle("-fx-background-color: transparent;");
         minimizeBtn.setStyle("-fx-background-color: transparent;");
+        settingsBtn.setStyle("-fx-background-color: transparent;");
+
+        makeButtonMouseInteractive(closeBtn);
+        makeButtonMouseInteractive(minimizeBtn);
+        makeButtonMouseInteractive(settingsBtn);
 
         setPrefHeight(height);
         setMinHeight(height);
@@ -64,6 +82,10 @@ class TitleBar extends HBox {
 
         minimizeBtn.setOnAction((ActionEvent actionEvent) -> {
             stage.setIconified(true);
+        });
+
+        settingsBtn.setOnAction((ActionEvent actionEvent) -> {
+            toggleSettings.run();
         });
 
         Region speratorRegion = new Region();
@@ -82,6 +104,16 @@ class TitleBar extends HBox {
             stage.setY(mouseEvenet.getScreenY() + dragDelta.y);
         });
 
-        this.getChildren().addAll(labelName, speratorRegion, minimizeBtn, closeBtn, paddingRegion);
+        this.getChildren().addAll(labelName, versionViewer, speratorRegion, settingsBtn, minimizeBtn, closeBtn);
+    }
+
+    private void makeButtonMouseInteractive(Node button) {
+        button.setOnMouseEntered(e -> {
+            button.setCursor(Cursor.HAND);
+        });
+
+        button.setOnMouseExited(e -> {
+            button.setCursor(Cursor.DEFAULT);
+        });
     }
 }

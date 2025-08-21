@@ -14,7 +14,7 @@ import javafx.util.Duration;
 
 public class AnimatedText extends StackPane {
 
-    private Text oldText = new Text("Disconnected");
+    private Text oldText = new Text("");
     private Text newText = new Text("");
 
     private final Color textDisconnectedColor = Color.valueOf("#B81A15");

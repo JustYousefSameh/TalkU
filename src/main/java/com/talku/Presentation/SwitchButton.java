@@ -14,6 +14,8 @@ import javafx.scene.Cursor;
 import javafx.scene.effect.BlurType;
 import javafx.scene.effect.DropShadow;
 import javafx.scene.image.ImageView;
+import javafx.scene.input.MouseButton;
+import javafx.scene.input.MouseEvent;
 import javafx.scene.layout.StackPane;
 import javafx.scene.paint.Color;
 import javafx.scene.shape.Circle;
@@ -231,5 +233,11 @@ public class SwitchButton extends StackPane {
         });
 
         setOnMouseClicked(click);
+    }
+
+    public void simulateClick() {
+        MouseEvent mouseEvent = new MouseEvent(MouseEvent.MOUSE_CLICKED, 1, 2, 3, 4, MouseButton.PRIMARY, 1, true, true,
+                true, true, true, true, true, true, true, true, null);
+        fireEvent(mouseEvent);
     }
 }
