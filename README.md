@@ -1,7 +1,7 @@
 ![Artboard 5](https://github.com/user-attachments/assets/6df5065f-ad80-47ce-b7f3-843d5676c5af)
 
 # TalkU is a VPN Application for Voice Chat
-https://github.com/user-attachments/assets/ec66194d-843e-475c-8514-dab902e46435
+https://github.com/user-attachments/assets/688b3350-7364-422b-be45-0e5133ae7d7f
 
 # Join our [Discord](https://discord.gg/V4GT6vQv93) for support or hangout :)
 
