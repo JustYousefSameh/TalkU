@@ -1,0 +1,10 @@
+[package]
+name = "wireguard-cli"
+version.workspace = true
+edition.workspace = true
+description = "Standalone elevated WireGuard helper for TalkU"
+
+[dependencies]
+defguard_wireguard_rs = "0.11.2"
+x25519-dalek = "3"
+log = "0.4"

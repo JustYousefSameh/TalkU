@@ -1,25 +1,55 @@
-use std::{fs, println};
+use std::fs;
 
 use tauri::Manager;
 
-pub mod wireguard;
+fn helper_path() -> Result<std::path::PathBuf, String> {
+    let current_exe = std::env::current_exe()
+        .map_err(|e| format!("Failed to get current exe path: {e}"))?;
+    let path = current_exe
+        .parent()
+        .ok_or_else(|| "Current exe has no parent directory".to_string())?
+        .join(if cfg!(target_os = "windows") {
+            "wireguard-cli.exe"
+        } else {
+            "wireguard-cli"
+        });
+    Ok(path)
+}
+
+fn elevate_helper(command: &str) -> Result<(), String> {
+    let helper = helper_path()?;
+    let status = runas::Command::new(&helper)
+        .arg(command)
+        .status()
+        .map_err(|e| format!("Failed to elevate wireguard helper: {e}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "wireguard command '{command}' failed with status: {:?}",
+            status.code()
+        ))
+    }
+}
 
 #[tauri::command]
 async fn connect_vpn() -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(|| {
-        wireguard::up().map_err(|e| format!("Failed to connect VPN: {}", e))
+        let output = elevate_helper("up")?;
+        Ok(output)
     })
     .await
-    .map_err(|e| format!("Spawning connect task failed: {}", e))?
+    .map_err(|e| format!("Spawning connect task failed: {e}"))?
 }
 
 #[tauri::command]
 async fn disconnect_vpn() -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(|| {
-        wireguard::down().map_err(|e| format!("Failed to disconnect VPN: {}", e))
+        let output = elevate_helper("down")?;
+        Ok(output)
     })
     .await
-    .map_err(|e| format!("Spawning disconnect task failed: {}", e))?
+    .map_err(|e| format!("Spawning disconnect task failed: {e}"))?
 }
 
 const API_URL: &str = "https://talku.ddns.net:8000/";
@@ -45,8 +75,6 @@ async fn get_connected_users_count() -> Result<i32, String> {
 
     Ok(body.connected_users)
 }
-
-use tauri_plugin_log::{Target, TargetKind};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {

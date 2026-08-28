@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "talku",
+  "productName": "TalkU",
   "version": "0.1.0",
   "identifier": "com.p0wer.talku",
   "build": {
@@ -12,10 +12,10 @@
   "app": {
     "windows": [
       {
-        "title": "talku",
+        "title": "TalkU",
         "decorations": false,
         "transparent": true,
-        "shadow" : false,
+        "shadow": false,
         "resizable": false,
         "width": 450,
         "height": 400

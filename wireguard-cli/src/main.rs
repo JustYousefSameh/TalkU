@@ -1,11 +1,11 @@
-use std::{net::SocketAddr, str::FromStr};
+use std::{net::SocketAddr, process::ExitCode, str::FromStr};
 
 use defguard_wireguard_rs::{
     key::Key, net::IpAddrMask, peer::Peer, InterfaceConfiguration, WGApi, WireguardInterfaceApi,
 };
 use x25519_dalek::{EphemeralSecret, PublicKey};
 
-pub fn ifname() -> String {
+fn ifname() -> String {
     if cfg!(target_os = "linux") || cfg!(target_os = "freebsd") {
         "wg0".into()
     } else {
@@ -13,7 +13,7 @@ pub fn ifname() -> String {
     }
 }
 
-pub fn up() -> Result<(), Box<dyn std::error::Error>> {
+fn up() -> Result<(), Box<dyn std::error::Error>> {
     let name = ifname();
 
     #[cfg(not(target_os = "macos"))]
@@ -46,16 +46,13 @@ pub fn up() -> Result<(), Box<dyn std::error::Error>> {
         fwmark: None,
     };
 
-    #[cfg(not(windows))]
-    wgapi.configure_interface(&interface_config)?;
-    #[cfg(windows)]
     wgapi.configure_interface(&interface_config)?;
     wgapi.configure_peer_routing(&interface_config.peers)?;
 
     Ok(())
 }
 
-pub fn down() -> Result<(), Box<dyn std::error::Error>> {
+fn down() -> Result<(), Box<dyn std::error::Error>> {
     let name = ifname();
 
     #[cfg(not(target_os = "macos"))]
@@ -66,4 +63,32 @@ pub fn down() -> Result<(), Box<dyn std::error::Error>> {
     wgapi.remove_interface()?;
 
     Ok(())
+}
+
+fn main() -> ExitCode {
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() < 2 {
+        eprintln!("usage: wireguard-cli <up|down>");
+        return ExitCode::from(1);
+    }
+
+    let result = match args[1].as_str() {
+        "up" => up(),
+        "down" => down(),
+        other => {
+            eprintln!("unknown command: {other}");
+            return ExitCode::from(1);
+        }
+    };
+
+    match result {
+        Ok(()) => {
+            println!("ok");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            ExitCode::from(1)
+        }
+    }
 }
