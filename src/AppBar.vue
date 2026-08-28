@@ -11,11 +11,10 @@ import {
     attachLogger,
 } from "@tauri-apps/plugin-log";
 
-// Attach this function to your button's onClick event
-function handleClose() {
-    info("Closing app");
-    const appWindow = getCurrentWindow();
-    appWindow.close();
+// Minimize to tray when the close button is pressed
+async function handleClose() {
+    info("Minimizing to tray");
+    await getCurrentWindow().hide();
 }
 
 async function minimizeWindow() {
