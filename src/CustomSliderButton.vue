@@ -98,7 +98,7 @@ async function pollUntilConnected(): Promise<Status> {
         }
         await new Promise((r) => setTimeout(r, 1000));
     }
-    throw new Error("failed to connect");
+    throw new Error("Failed to connect.");
 }
 </script>
 
