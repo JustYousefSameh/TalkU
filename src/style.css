@@ -1,0 +1,16 @@
+@import "tailwindcss";
+
+html,
+body,
+#root {
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    /* The body must be transparent for the rounded container's
+     corners to actually show the desktop behind them */
+    background: transparent !important;
+}
+
+body {
+    overflow: hidden;
+}

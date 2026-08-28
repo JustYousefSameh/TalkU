@@ -1,0 +1,69 @@
+use std::{net::SocketAddr, str::FromStr};
+
+use defguard_wireguard_rs::{
+    key::Key, net::IpAddrMask, peer::Peer, InterfaceConfiguration, WGApi, WireguardInterfaceApi,
+};
+use x25519_dalek::{EphemeralSecret, PublicKey};
+
+pub fn ifname() -> String {
+    if cfg!(target_os = "linux") || cfg!(target_os = "freebsd") {
+        "wg0".into()
+    } else {
+        "utun3".into()
+    }
+}
+
+pub fn up() -> Result<(), Box<dyn std::error::Error>> {
+    let name = ifname();
+
+    #[cfg(not(target_os = "macos"))]
+    let mut wgapi = WGApi::<defguard_wireguard_rs::Kernel>::new(name.clone())?;
+    #[cfg(target_os = "macos")]
+    let mut wgapi = WGApi::<defguard_wireguard_rs::Userspace>::new(name.clone())?;
+
+    wgapi.create_interface()?;
+
+    let secret = EphemeralSecret::random();
+    let key = PublicKey::from(&secret);
+    let peer_key: Key = key.as_ref().try_into().unwrap();
+    let mut peer = Peer::new(peer_key.clone());
+
+    log::info!("endpoint");
+    let endpoint: SocketAddr = "10.10.10.10:55001".parse().unwrap();
+    peer.endpoint = Some(endpoint);
+    peer.persistent_keepalive_interval = Some(25);
+    peer.allowed_ips.push(IpAddrMask::from_str("10.6.0.0/24")?);
+    peer.allowed_ips
+        .push(IpAddrMask::from_str("192.168.22.0/24")?);
+
+    let interface_config = InterfaceConfiguration {
+        name: name.clone(),
+        prvkey: "AAECAwQFBgcICQoLDA0OD/Dh0sO0pZaHeGlaSzwtHg8=".to_string(),
+        addresses: vec!["10.6.0.30".parse().unwrap()],
+        port: 12345,
+        peers: vec![peer],
+        mtu: None,
+        fwmark: None,
+    };
+
+    #[cfg(not(windows))]
+    wgapi.configure_interface(&interface_config)?;
+    #[cfg(windows)]
+    wgapi.configure_interface(&interface_config, &[], &[])?;
+    wgapi.configure_peer_routing(&interface_config.peers)?;
+
+    Ok(())
+}
+
+pub fn down() -> Result<(), Box<dyn std::error::Error>> {
+    let name = ifname();
+
+    #[cfg(not(target_os = "macos"))]
+    let wgapi = WGApi::<defguard_wireguard_rs::Kernel>::new(name.clone())?;
+    #[cfg(target_os = "macos")]
+    let wgapi = WGApi::<defguard_wireguard_rs::Userspace>::new(name.clone())?;
+
+    wgapi.remove_interface()?;
+
+    Ok(())
+}
