@@ -72,9 +72,7 @@ fn is_daemon_alive() -> bool {
     let Ok(mut stream) = TcpStream::connect(("127.0.0.1", port)) else {
         return false;
     };
-    stream
-        .set_read_timeout(Some(Duration::from_secs(2)))
-        .ok();
+    stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
     let _ = stream.write_all(b"status\n");
     let mut buf = [0u8; 64];
     stream.read(&mut buf).ok().is_some()
@@ -189,7 +187,7 @@ async fn check_config_and_connect() -> Result<(), String> {
         .await
         .map_err(|e| e.to_string())?;
 
-    connect_vpn()?;
+    let _ = connect_vpn();
 
     Ok(())
 }
@@ -243,8 +241,7 @@ pub fn run() {
                 }
             }
 
-            let show_i =
-                MenuItem::with_id(app, "show", "Show", true, None::<&str>)?;
+            let show_i = MenuItem::with_id(app, "show", "Show", true, None::<&str>)?;
             let exit_i = MenuItem::with_id(app, "exit", "Exit", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show_i, &exit_i])?;
 

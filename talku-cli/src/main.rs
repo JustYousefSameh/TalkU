@@ -190,6 +190,26 @@ struct Daemon {
     wstunnel: Option<std::process::Child>,
     status_listener: Option<TcpListener>,
 }
+fn up() -> Result<(), Box<dyn std::error::Error>> {
+    log("up: start");
+    let cfg = load_config()?;
+
+    // Start wstunnel FIRST, before setting up the adapter. Establishing the
+    // outbound WSS tunnel to the server takes time, so kick it off now so it is
+    // ready (or at least warming up) by the time the WireGuard interface is
+    // configured and starts handshaking. The child handle is leaked to keep it
+    // alive; it is killed by name on down.
+    match start_wstunnel() {
+        Ok(child) => {
+            Box::leak(Box::new(child));
+        }
+        Err(e) => {
+            log(&format!("up: wstunnel failed to start: {e}"));
+            eprintln!("warning: failed to start wstunnel: {e}");
+        }
+    }
+
+    let name = ifname();
 
 impl Default for Daemon {
     fn default() -> Self {
@@ -256,6 +276,7 @@ impl Daemon {
             fwmark: None,
         };
 
+<<<<<<< HEAD
         wgapi.configure_interface(&interface_config)?;
         wgapi.configure_peer_routing(&interface_config.peers)?;
 
@@ -304,6 +325,13 @@ impl Daemon {
 
     fn down(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         log("down: start");
+=======
+    // Start the loopback status server (broadcasts handshake state every 2s).
+    if let Err(e) = start_status_server() {
+        log(&format!("up: status server failed: {e}"));
+        return Err(e);
+    }
+>>>>>>> ca8cea7edd871ebfea8024e6180afe4a57271db0
 
         // Kill wstunnel by its own handle.
         if let Some(mut child) = self.wstunnel.take() {
