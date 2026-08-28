@@ -9,7 +9,7 @@ const props = defineProps<{
 const canvasRef = ref<HTMLCanvasElement | null>(null);
 
 const colors: Record<Status, [number, number, number]> = {
-    disconnected: [0x35, 0x00, 0x00],
+    disconnected: [0x28, 0x00, 0x00],
     connecting: [0x1d, 0x1a, 0x03],
     connected: [0x08, 0x2b, 0x09],
 };

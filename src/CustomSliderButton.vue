@@ -41,7 +41,7 @@ async function nextState() {
     if (props.status === "connected") {
         emit("update:status", "connecting");
         try {
-            // await invoke("disconnect_vpn");
+            await invoke("disconnect_vpn");
             emit("update:status", "disconnected");
         } catch (err) {
             console.error(err);
@@ -50,13 +50,28 @@ async function nextState() {
     } else if (props.status === "disconnected") {
         emit("update:status", "connecting");
         try {
-            // await invoke("connect_vpn");
-            emit("update:status", "connected");
+            await invoke("connect_vpn");
+            const result = await pollUntilConnected();
+            emit("update:status", result);
         } catch (err) {
             console.error(err);
             emit("update:status", "disconnected");
         }
     }
+}
+
+async function pollUntilConnected(): Promise<Status> {
+    const deadline = Date.now() + 30000;
+    while (Date.now() < deadline) {
+        try {
+            const line = await invoke<string>("get_vpn_status");
+            if (line.startsWith("connected")) return "connected";
+        } catch {
+            // Status server not reachable yet; keep polling.
+        }
+        await new Promise((r) => setTimeout(r, 1000));
+    }
+    return "disconnected";
 }
 </script>
 
