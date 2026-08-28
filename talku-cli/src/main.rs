@@ -183,6 +183,22 @@ fn start_wstunnel() -> Result<std::process::Child, String> {
 fn up() -> Result<(), Box<dyn std::error::Error>> {
     log("up: start");
     let cfg = load_config()?;
+
+    // Start wstunnel FIRST, before setting up the adapter. Establishing the
+    // outbound WSS tunnel to the server takes time, so kick it off now so it is
+    // ready (or at least warming up) by the time the WireGuard interface is
+    // configured and starts handshaking. The child handle is leaked to keep it
+    // alive; it is killed by name on down.
+    match start_wstunnel() {
+        Ok(child) => {
+            Box::leak(Box::new(child));
+        }
+        Err(e) => {
+            log(&format!("up: wstunnel failed to start: {e}"));
+            eprintln!("warning: failed to start wstunnel: {e}");
+        }
+    }
+
     let name = ifname();
 
     #[cfg(not(target_os = "macos"))]
@@ -244,18 +260,6 @@ fn up() -> Result<(), Box<dyn std::error::Error>> {
     // must keep it alive for the lifetime of this process (making this a
     // long-running helper). The OS removes the adapter when this process exits.
     Box::leak(Box::new(wgapi));
-
-    // Start wstunnel. Keep its handle alive so the tunnel keeps running; it is
-    // killed by name on down.
-    match start_wstunnel() {
-        Ok(child) => {
-            Box::leak(Box::new(child));
-        }
-        Err(e) => {
-            log(&format!("up: wstunnel failed to start: {e}"));
-            eprintln!("warning: failed to start wstunnel: {e}");
-        }
-    }
 
     // Start the loopback status server (broadcasts handshake state every 2s).
     if let Err(e) = start_status_server() {

@@ -105,7 +105,7 @@ async fn check_config_and_connect() -> Result<(), String> {
         .await
         .map_err(|e| e.to_string())?;
 
-    connect_vpn();
+    let _ = connect_vpn();
 
     Ok(())
 }
