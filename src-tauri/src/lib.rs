@@ -2,7 +2,11 @@ mod config;
 
 use std::fs;
 
-use tauri::Manager;
+use tauri::{
+    menu::{Menu, MenuItem},
+    tray::TrayIconBuilder,
+    Manager,
+};
 
 fn helper_path(file_name: &str) -> Result<std::path::PathBuf, String> {
     let current_exe =
@@ -154,7 +158,53 @@ pub fn run() {
                     let _ = fs::remove_dir_all(&app_cache);
                 }
             }
+
+            let show_i =
+                MenuItem::with_id(app, "show", "Show", true, None::<&str>)?;
+            let exit_i = MenuItem::with_id(app, "exit", "Exit", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&show_i, &exit_i])?;
+
+            let _tray = TrayIconBuilder::with_id("main")
+                .icon(
+                    app.default_window_icon()
+                        .cloned()
+                        .expect("default window icon not found"),
+                )
+                .menu(&menu)
+                .show_menu_on_left_click(false)
+                .on_tray_icon_event(|tray, event| {
+                    if let tauri::tray::TrayIconEvent::DoubleClick {
+                        button: tauri::tray::MouseButton::Left,
+                        ..
+                    } = event
+                    {
+                        if let Some(window) = tray.app_handle().get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                        }
+                    }
+                })
+                .on_menu_event(|app, event| match event.id.as_ref() {
+                    "show" => {
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                        }
+                    }
+                    "exit" => {
+                        app.exit(0);
+                    }
+                    _ => {}
+                })
+                .build(app)?;
+
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+            }
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
