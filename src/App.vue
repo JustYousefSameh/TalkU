@@ -12,7 +12,7 @@ const status = ref<Status>("disconnected");
 
 <template>
     <main>
-        <div class="app-main">
+        <div class="app-main"  data-tauri-drag-region="deep">
             <GradientBackgroundWithImage :status="status" />
             <AppBar />
             <CustomSliderButton v-model:status="status" />
@@ -65,7 +65,7 @@ body {
     overflow: hidden;
     width: 100vw;
     height: 100vh;
-    border-radius: 12px;
+    border-radius: 24px;
     background: transparent;
 }
 

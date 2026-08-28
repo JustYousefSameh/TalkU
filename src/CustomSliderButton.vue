@@ -32,7 +32,7 @@ watch(
             shockwaveTimer = window.setTimeout(() => {
                 shockwave.value = true;
                 pop.value = true;
-            }, 350);
+            }, 300);
         }
     },
 );
@@ -41,7 +41,7 @@ async function nextState() {
     if (props.status === "connected") {
         emit("update:status", "connecting");
         try {
-            await invoke("disconnect_vpn");
+            // await invoke("disconnect_vpn");
             emit("update:status", "disconnected");
         } catch (err) {
             console.error(err);
@@ -50,7 +50,7 @@ async function nextState() {
     } else if (props.status === "disconnected") {
         emit("update:status", "connecting");
         try {
-            await invoke("connect_vpn");
+            // await invoke("connect_vpn");
             emit("update:status", "connected");
         } catch (err) {
             console.error(err);
@@ -211,7 +211,7 @@ async function nextState() {
 }
 
 .toggle.pop {
-    animation: toggle-pop 0.4s ease-out;
+    animation: toggle-pop 0.25s ease-out;
 }
 
 @keyframes toggle-pop {

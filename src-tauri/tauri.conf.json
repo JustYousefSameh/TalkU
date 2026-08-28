@@ -15,6 +15,8 @@
         "title": "talku",
         "decorations": false,
         "transparent": true,
+        "shadow" : false,
+        "resizable": false,
         "width": 450,
         "height": 400
       }

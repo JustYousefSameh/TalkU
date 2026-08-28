@@ -49,7 +49,7 @@ pub fn up() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(not(windows))]
     wgapi.configure_interface(&interface_config)?;
     #[cfg(windows)]
-    wgapi.configure_interface(&interface_config, &[], &[])?;
+    wgapi.configure_interface(&interface_config)?;
     wgapi.configure_peer_routing(&interface_config.peers)?;
 
     Ok(())
@@ -59,9 +59,9 @@ pub fn down() -> Result<(), Box<dyn std::error::Error>> {
     let name = ifname();
 
     #[cfg(not(target_os = "macos"))]
-    let wgapi = WGApi::<defguard_wireguard_rs::Kernel>::new(name.clone())?;
+    let mut wgapi = WGApi::<defguard_wireguard_rs::Kernel>::new(name.clone())?;
     #[cfg(target_os = "macos")]
-    let wgapi = WGApi::<defguard_wireguard_rs::Userspace>::new(name.clone())?;
+    let mut wgapi = WGApi::<defguard_wireguard_rs::Userspace>::new(name.clone())?;
 
     wgapi.remove_interface()?;
 

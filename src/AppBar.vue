@@ -1,8 +1,26 @@
 <script setup lang="ts">
 import { Settings, Minus, X } from "lucide-vue-next";
-function closeWindow() {}
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import {
+    warn,
+    debug,
+    trace,
+    info,
+    error,
+    attachConsole,
+    attachLogger,
+} from "@tauri-apps/plugin-log";
 
-function minimizeWindow() {}
+// Attach this function to your button's onClick event
+function handleClose() {
+    info("Closing app");
+    const appWindow = getCurrentWindow();
+    appWindow.close();
+}
+
+async function minimizeWindow() {
+    await getCurrentWindow().minimize();
+}
 
 function openSettings() {}
 </script>
@@ -10,9 +28,9 @@ function openSettings() {}
 <template>
     <main>
         <div
-            class="flex flex-row justify-between items-center w-full absolute mt-3 pl-3 pr-4 pointer-events-auto appbar-slide"
+            class="flex flex-row justify-between items-center w-full pt-2 pl-3 pr-4 appbar-slide"
         >
-            <div>
+            <div class="flex-1">
                 <span class="app-title text-gray-300 pr-1 text-sm">TalkU</span>
                 <span class="text-gray-500 text-xs">V2.4</span>
             </div>
@@ -26,7 +44,7 @@ function openSettings() {}
                 >
                     <Minus class="h-5" />
                 </button>
-                <button class="text-white cursor-pointer" @click="closeWindow">
+                <button class="text-white cursor-pointer" @click="handleClose">
                     <X class="h-5" />
                 </button>
             </div>

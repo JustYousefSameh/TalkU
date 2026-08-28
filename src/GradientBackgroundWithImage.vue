@@ -231,7 +231,7 @@ watch(
     position: absolute;
     inset: 0;
     overflow: hidden;
-    background: #000000;
+    background: transparent;
 }
 
 .gradient-canvas {
@@ -240,6 +240,8 @@ watch(
     width: 100%;
     height: 100%;
     display: block;
+    border-radius: 12px;
+    overflow: hidden;
 }
 
 .world {
@@ -251,5 +253,7 @@ watch(
     width: 450px;
     box-sizing: border-box;
     pointer-events: none;
+    border-radius: 12px;
+    overflow: hidden;
 }
 </style>
