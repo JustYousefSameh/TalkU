@@ -5,6 +5,7 @@ import CustomSliderButton from "./CustomSliderButton.vue";
 import SocialLink from "./SocialLink.vue";
 import ActiveUsers from "./ActiveUsers.vue";
 import GradientBackgroundWithImage from "./GradientBackgroundWithImage.vue";
+import ConnectionTimer from "./ConnectionTimer.vue";
 import type { Status } from "./types";
 
 const status = ref<Status>("disconnected");
@@ -16,6 +17,7 @@ const status = ref<Status>("disconnected");
             <GradientBackgroundWithImage :status="status" />
             <AppBar />
             <CustomSliderButton v-model:status="status" />
+            <ConnectionTimer :status="status" />
             <ActiveUsers />
             <div class="socials">
                 <SocialLink

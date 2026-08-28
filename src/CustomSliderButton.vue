@@ -50,7 +50,7 @@ async function nextState() {
     } else if (props.status === "disconnected") {
         emit("update:status", "connecting");
         try {
-            await invoke("connect_vpn");
+            await invoke("check_config_and_connect");
             const result = await pollUntilConnected();
             emit("update:status", result);
         } catch (err) {

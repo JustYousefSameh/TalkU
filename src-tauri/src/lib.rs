@@ -1,24 +1,25 @@
+mod config;
+
 use std::fs;
 
 use tauri::Manager;
 
-fn helper_path() -> Result<std::path::PathBuf, String> {
+fn helper_path(file_name: &str) -> Result<std::path::PathBuf, String> {
     let current_exe =
         std::env::current_exe().map_err(|e| format!("Failed to get current exe path: {e}"))?;
     let path = current_exe
         .parent()
         .ok_or_else(|| "Current exe has no parent directory".to_string())?
         .join(if cfg!(target_os = "windows") {
-            "talku-cli.exe"
+            file_name
         } else {
-            "talku-cli"
+            file_name
         });
-    println!("helper_path = {:?}", path);
     Ok(path)
 }
 
 fn elevate_in_background(command: &str) {
-    let helper = match helper_path() {
+    let helper = match helper_path("talku-cli.exe") {
         Ok(p) => p,
         Err(e) => {
             eprintln!("helper_path error: {e}");
@@ -38,8 +39,8 @@ fn elevate_in_background(command: &str) {
     });
 }
 
-fn helper_dir() -> Result<std::path::PathBuf, String> {
-    let helper = helper_path()?;
+fn talku_cli_dir() -> Result<std::path::PathBuf, String> {
+    let helper = helper_path("talku-cli.exe")?;
     helper
         .parent()
         .map(|p| p.to_path_buf())
@@ -51,7 +52,7 @@ fn read_status_line() -> Result<String, String> {
     use std::net::TcpStream;
     use std::time::Duration;
 
-    let port_file = helper_dir()?.join("talku-cli.port");
+    let port_file = talku_cli_dir()?.join("talku-cli.port");
     let port: u16 = std::fs::read_to_string(&port_file)
         .map_err(|e| format!("Failed to read status port file: {e}"))?
         .trim()
@@ -75,7 +76,6 @@ fn read_status_line() -> Result<String, String> {
     Ok(line.trim().to_string())
 }
 
-#[tauri::command]
 fn connect_vpn() -> Result<(), String> {
     elevate_in_background("up");
     Ok(())
@@ -89,6 +89,20 @@ fn get_vpn_status() -> Result<String, String> {
 #[tauri::command]
 fn disconnect_vpn() -> Result<(), String> {
     elevate_in_background("down");
+    Ok(())
+}
+
+#[tauri::command]
+async fn check_config_and_connect() -> Result<(), String> {
+    let config_path = helper_path("talkuwg.conf")
+        .map_err(|_| "Could not find talkuwg config path".to_string())?;
+
+    let _config = config::load_or_fetch_config(&config_path)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    connect_vpn();
+
     Ok(())
 }
 
@@ -127,7 +141,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_connected_users_count,
             get_vpn_status,
-            connect_vpn,
+            check_config_and_connect,
             disconnect_vpn
         ])
         .setup(|app| {

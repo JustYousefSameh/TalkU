@@ -1,7 +1,6 @@
-use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 
-use x25519_dalek::{PublicKey, StaticSecret};
+use defguard_wireguard_rs::key::Key;
 
 const API_URL: &str = "https://talku.ddns.net:8000/";
 
@@ -37,11 +36,11 @@ pub struct Keypair {
 
 impl Keypair {
     pub fn generate() -> Self {
-        let secret = StaticSecret::random();
-        let public = PublicKey::from(&secret);
+        let private = Key::generate();
+        let public = private.public_key();
         Self {
-            public_key: base64::engine::general_purpose::STANDARD.encode(public.to_bytes()),
-            private_key: base64::engine::general_purpose::STANDARD.encode(secret.to_bytes()),
+            public_key: public.to_string(),
+            private_key: private.to_string(),
         }
     }
 }
@@ -63,7 +62,7 @@ impl From<ConfigError> for String {
     }
 }
 
-pub async fn get_config_from_server(api_key: &str) -> Result<(ServerConfig, String), ConfigError> {
+pub async fn get_config_from_server() -> Result<(ServerConfig, String), ConfigError> {
     // Generate public and private key
     let keypair = Keypair::generate();
     let public_key = keypair.public_key;
@@ -73,7 +72,7 @@ pub async fn get_config_from_server(api_key: &str) -> Result<(ServerConfig, Stri
 
     let client_key = ClientKey {
         client_pub_key: &public_key,
-        api_key: api_key,
+        api_key: "z~WXkukTav2^dodr5#9",
     };
 
     let client = reqwest::Client::new();
@@ -141,7 +140,10 @@ pub fn load_config(path: &std::path::Path) -> Result<Config, ConfigError> {
             continue;
         }
         if let Some((k, v)) = line.split_once('=') {
-            kv.insert(format!("{section}.{}", k.trim()).to_lowercase(), v.trim().to_string());
+            kv.insert(
+                format!("{section}.{}", k.trim()).to_lowercase(),
+                v.trim().to_string(),
+            );
         }
     }
 
@@ -172,15 +174,15 @@ pub fn load_config(path: &std::path::Path) -> Result<Config, ConfigError> {
     };
     let private_key = need(&kv, "interface.privatekey")?.to_string();
 
-    Ok(Config { server, private_key })
+    Ok(Config {
+        server,
+        private_key,
+    })
 }
 
 /// Load the cached config from `path`. If it does not exist, fetch it from the
 /// server and write it to `path`.
-pub async fn load_or_fetch_config(
-    path: &std::path::Path,
-    api_key: &str,
-) -> Result<Config, ConfigError> {
+pub async fn load_or_fetch_config(path: &std::path::Path) -> Result<Config, ConfigError> {
     match load_config(path) {
         Ok(config) => {
             println!("Loaded config from {}", path.display());
@@ -188,8 +190,11 @@ pub async fn load_or_fetch_config(
         }
         Err(_) => {
             println!("Config not found, fetching from server");
-            let (server, private_key) = get_config_from_server(api_key).await?;
-            let config = Config { server, private_key };
+            let (server, private_key) = get_config_from_server().await?;
+            let config = Config {
+                server,
+                private_key,
+            };
             if let Some(parent) = path.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }

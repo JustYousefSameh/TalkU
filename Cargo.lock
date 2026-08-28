@@ -4041,6 +4041,7 @@ dependencies = [
 name = "talku"
 version = "0.1.0"
 dependencies = [
+ "defguard_wireguard_rs",
  "elevated-command",
  "log",
  "reqwest 0.12.28",
