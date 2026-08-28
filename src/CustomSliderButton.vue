@@ -10,6 +10,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
     (e: "update:status", value: Status): void;
+    (e: "error", message: string): void;
 }>();
 
 const status = computed(() => props.status);
@@ -37,28 +38,54 @@ watch(
     },
 );
 
-async function nextState() {
-    if (props.status === "connected") {
-        emit("update:status", "connecting");
-        try {
-            await invoke("disconnect_vpn");
-            emit("update:status", "disconnected");
-        } catch (err) {
-            console.error(err);
-            emit("update:status", "connected");
-        }
-    } else if (props.status === "disconnected") {
-        emit("update:status", "connecting");
-        try {
-            await invoke("check_config_and_connect");
-            const result = await pollUntilConnected();
-            emit("update:status", result);
-        } catch (err) {
-            console.error(err);
-            emit("update:status", "disconnected");
-        }
+type Action = "connect" | "disconnect" | null;
+
+let lastAction: Action = null;
+
+async function disconnect() {
+    try {
+        await invoke("disconnect_vpn");
+        emit("update:status", "disconnected");
+    } catch (err) {
+        emit("error", String(err));
+        emit("update:status", "connected");
     }
 }
+
+async function connect() {
+    try {
+        await invoke("check_config_and_connect");
+        const result = await pollUntilConnected();
+        emit("update:status", result);
+    } catch (err) {
+        emit("error", String(err));
+        emit("update:status", "disconnected");
+    }
+}
+
+async function nextState() {
+    if (props.status === "connected") {
+        lastAction = "disconnect";
+        emit("update:status", "disconnected");
+        await disconnect();
+    } else if (props.status === "disconnected") {
+        lastAction = "connect";
+        emit("update:status", "connecting");
+        await connect();
+    }
+}
+
+async function retryLastAction() {
+    if (lastAction === "disconnect") {
+        emit("update:status", "disconnected");
+        await disconnect();
+    } else if (lastAction === "connect") {
+        emit("update:status", "connecting");
+        await connect();
+    }
+}
+
+defineExpose({ retryLastAction });
 
 async function pollUntilConnected(): Promise<Status> {
     const deadline = Date.now() + 30000;
@@ -71,7 +98,7 @@ async function pollUntilConnected(): Promise<Status> {
         }
         await new Promise((r) => setTimeout(r, 1000));
     }
-    return "disconnected";
+    throw new Error("failed to connect");
 }
 </script>
 

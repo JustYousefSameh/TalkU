@@ -6,9 +6,17 @@ import SocialLink from "./SocialLink.vue";
 import ActiveUsers from "./ActiveUsers.vue";
 import GradientBackgroundWithImage from "./GradientBackgroundWithImage.vue";
 import ConnectionTimer from "./ConnectionTimer.vue";
+import ErrorBox from "./ErrorBox.vue";
 import type { Status } from "./types";
 
 const status = ref<Status>("disconnected");
+const errorMessage = ref<string | null>(null);
+const sliderRef = ref<InstanceType<typeof CustomSliderButton> | null>(null);
+
+function onRetry() {
+    errorMessage.value = null;
+    sliderRef.value?.retryLastAction();
+}
 </script>
 
 <template>
@@ -16,9 +24,19 @@ const status = ref<Status>("disconnected");
         <div class="app-main"  data-tauri-drag-region="deep">
             <GradientBackgroundWithImage :status="status" />
             <AppBar />
-            <CustomSliderButton v-model:status="status" />
+            <CustomSliderButton
+                ref="sliderRef"
+                v-model:status="status"
+                @error="errorMessage = $event"
+            />
             <ConnectionTimer :status="status" />
             <ActiveUsers />
+            <ErrorBox
+                v-if="errorMessage"
+                :message="errorMessage"
+                @retry="onRetry"
+                @cancel="errorMessage = null"
+            />
             <div class="socials">
                 <SocialLink
                     image="/discord.png"
