@@ -1,4 +1,8 @@
-use std::{net::SocketAddr, process::ExitCode, str::FromStr};
+use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::process::ExitCode;
+use std::str::FromStr;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use defguard_wireguard_rs::{
     key::Key, net::IpAddrMask, peer::Peer, InterfaceConfiguration, WGApi, WireguardInterfaceApi,
@@ -113,10 +117,6 @@ fn comma_split(value: &str) -> Vec<String> {
 }
 
 fn load_config() -> Result<Config, String> {
-    // ShellExecuteW (used by elevated-command/runas) always starts the helper with
-    // its working directory set to %SystemRoot%\System32, so a relative config path
-    // would resolve against System32 and fail. Resolve the default config relative to
-    // the exe's own directory instead of the current working directory.
     let path = match std::env::args().nth(2) {
         Some(p) => p,
         None => exe_dir()?
@@ -180,6 +180,16 @@ fn start_wstunnel() -> Result<std::process::Child, String> {
         .map_err(|e| format!("Failed to start wstunnel: {e}"))
 }
 
+/// Holds all long-lived state for the daemon so it can bring the tunnel up and
+/// down on demand without exiting (which would otherwise close the leaked
+/// WireGuardNT adapter handle). Keeping the WGApi alive inside the daemon is
+/// exactly what makes the adapter persist while `up` is active, and taking it
+/// out + `remove_interface` on `down` frees it cleanly.
+struct Daemon {
+    wgapi: Option<WGApi<defguard_wireguard_rs::Kernel>>,
+    wstunnel: Option<std::process::Child>,
+    status_listener: Option<TcpListener>,
+}
 fn up() -> Result<(), Box<dyn std::error::Error>> {
     log("up: start");
     let cfg = load_config()?;
@@ -201,138 +211,149 @@ fn up() -> Result<(), Box<dyn std::error::Error>> {
 
     let name = ifname();
 
-    #[cfg(not(target_os = "macos"))]
-    let mut wgapi = WGApi::<defguard_wireguard_rs::Kernel>::new(name.clone())?;
-    #[cfg(target_os = "macos")]
-    let mut wgapi = WGApi::<defguard_wireguard_rs::Userspace>::new(name.clone())?;
-
-    wgapi.create_interface()?;
-
-    let mut peers = Vec::new();
-    for p in &cfg.peers {
-        let public_key = p.public_key.as_deref().ok_or("Peer missing PublicKey")?;
-        let peer_key: Key = Key::from_str(public_key).map_err(|e| format!("Bad PublicKey: {e}"))?;
-        let endpoint: SocketAddr = "127.0.0.1:51820".parse().unwrap();
-
-        let mut peer = Peer::new(peer_key);
-        peer.endpoint = Some(endpoint);
-        peer.persistent_keepalive_interval = p.keepalive;
-        for ip in &p.allowed_ips {
-            peer.allowed_ips.push(IpAddrMask::from_str(ip)?);
+impl Default for Daemon {
+    fn default() -> Self {
+        Self {
+            wgapi: None,
+            wstunnel: None,
+            status_listener: None,
         }
-        peers.push(peer);
+    }
+}
+
+impl Daemon {
+    fn is_up(&self) -> bool {
+        self.wgapi.is_some()
     }
 
-    let prvkey = cfg
-        .private_key
-        .clone()
-        .ok_or("Interface missing PrivateKey")?;
-    let addresses = cfg
-        .addresses
-        .iter()
-        .map(|a| a.parse())
-        .collect::<Result<Vec<_>, _>>()?;
+    fn up(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        if self.is_up() {
+            return Ok(());
+        }
+        log("up: start");
+        let cfg = load_config()?;
+        let name = ifname();
 
-    let interface_config = InterfaceConfiguration {
-        name: name.clone(),
-        prvkey,
-        addresses,
-        port: cfg.listen_port.unwrap_or(54321),
-        peers,
-        mtu: None,
-        fwmark: None,
-    };
+        #[cfg(not(target_os = "macos"))]
+        let mut wgapi = WGApi::<defguard_wireguard_rs::Kernel>::new(name.clone())?;
+        #[cfg(target_os = "macos")]
+        let mut wgapi = WGApi::<defguard_wireguard_rs::Userspace>::new(name.clone())?;
 
-    wgapi.configure_interface(&interface_config)?;
-    wgapi.configure_peer_routing(&interface_config.peers)?;
+        wgapi.create_interface()?;
 
-    if !cfg.dns.is_empty() {
-        let dns_ips = cfg
-            .dns
+        let mut peers = Vec::new();
+        for p in &cfg.peers {
+            let public_key = p.public_key.as_deref().ok_or("Peer missing PublicKey")?;
+            let peer_key: Key = Key::from_str(public_key).map_err(|e| format!("Bad PublicKey: {e}"))?;
+            let endpoint: SocketAddr = "127.0.0.1:51820".parse().unwrap();
+
+            let mut peer = Peer::new(peer_key);
+            peer.endpoint = Some(endpoint);
+            peer.persistent_keepalive_interval = p.keepalive;
+            for ip in &p.allowed_ips {
+                peer.allowed_ips.push(IpAddrMask::from_str(ip)?);
+            }
+            peers.push(peer);
+        }
+
+        let prvkey = cfg
+            .private_key
+            .clone()
+            .ok_or("Interface missing PrivateKey")?;
+        let addresses = cfg
+            .addresses
             .iter()
-            .map(|d| d.parse())
+            .map(|a| a.parse())
             .collect::<Result<Vec<_>, _>>()?;
-        wgapi.configure_dns(&dns_ips, &[])?;
+
+        let interface_config = InterfaceConfiguration {
+            name: name.clone(),
+            prvkey,
+            addresses,
+            port: cfg.listen_port.unwrap_or(54321),
+            peers,
+            mtu: None,
+            fwmark: None,
+        };
+
+<<<<<<< HEAD
+        wgapi.configure_interface(&interface_config)?;
+        wgapi.configure_peer_routing(&interface_config.peers)?;
+
+        if !cfg.dns.is_empty() {
+            let dns_ips = cfg
+                .dns
+                .iter()
+                .map(|d| d.parse())
+                .collect::<Result<Vec<_>, _>>()?;
+            wgapi.configure_dns(&dns_ips, &[])?;
+        }
+
+        // Keep the api handle alive for the lifetime of this daemon process so
+        // the WireGuardNT adapter persists while we are "up".
+        self.wgapi = Some(wgapi);
+
+        // Start wstunnel. Keep its handle so the tunnel keeps running.
+        match start_wstunnel() {
+            Ok(child) => {
+                self.wstunnel = Some(child);
+                log("up: wstunnel started");
+            }
+            Err(e) => {
+                log(&format!("up: wstunnel failed to start: {e}"));
+                eprintln!("warning: failed to start wstunnel: {e}");
+            }
+        }
+
+        // Start the loopback status server if not already running.
+        if self.status_listener.is_none() {
+            let listener = TcpListener::bind("127.0.0.1:0")?;
+            let port = listener.local_addr()?.port();
+            let port_file = exe_dir()?.join("talku-cli.port");
+            std::fs::write(&port_file, port.to_string())?;
+
+            let running = Arc::new(AtomicBool::new(true));
+            let thread_listener = listener.try_clone()?;
+            std::thread::spawn(move || broadcast_status(thread_listener, running));
+            self.status_listener = Some(listener);
+            log("up: status server started");
+        }
+
+        log("up: done");
+        Ok(())
     }
 
-    // Leak the wgapi so its adapter handle is not closed. A WireGuardNT adapter
-    // created by this process is deleted when the last handle is dropped, so we
-    // must keep it alive for the lifetime of this process (making this a
-    // long-running helper). The OS removes the adapter when this process exits.
-    Box::leak(Box::new(wgapi));
-
+    fn down(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        log("down: start");
+=======
     // Start the loopback status server (broadcasts handshake state every 2s).
     if let Err(e) = start_status_server() {
         log(&format!("up: status server failed: {e}"));
         return Err(e);
     }
+>>>>>>> ca8cea7edd871ebfea8024e6180afe4a57271db0
 
-    // Write our own PID so `down` (a separate elevated process) can terminate
-    // this daemon. Killing this process closes the leaked adapter handle, which
-    // is what makes Windows actually delete the WireGuardNT adapter.
-    if let Err(e) = write_pid() {
-        log(&format!("up: failed to write pid file: {e}"));
-    }
+        // Kill wstunnel by its own handle.
+        if let Some(mut child) = self.wstunnel.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+            log("down: wstunnel killed");
+        }
 
-    log("up: running (daemon started)");
-    Ok(())
-}
-
-fn write_pid() -> Result<(), String> {
-    let pid = std::process::id();
-    let pid_file = exe_dir()?.join("talku-cli.pid");
-    std::fs::write(&pid_file, pid.to_string())
-        .map_err(|e| format!("Failed to write pid file: {e}"))
-}
-
-fn down() -> Result<(), Box<dyn std::error::Error>> {
-    log("down: start");
-
-    // Kill wstunnel by image name (daemon also leaks its handle).
-    #[cfg(windows)]
-    {
-        std::process::Command::new("taskkill")
-            .args(["/IM", "wstunnel.exe", "/F"])
-            .status()
-            .ok();
-    }
-
-    // Kill the running `up` daemon via the PID it wrote. When the daemon
-    // process exits, its leaked WireGuardNT adapter handle is closed, which is
-    // what makes Windows actually delete the adapter. This is the reliable
-    // teardown (a separate `remove_interface` alone cannot remove an adapter
-    // whose handle is still held open by the live daemon).
-    #[cfg(windows)]
-    {
-        if let Ok(pid_file) = exe_dir().map(|d| d.join("talku-cli.pid")) {
-            if let Ok(pid_text) = std::fs::read_to_string(&pid_file) {
-                if let Ok(pid) = pid_text.trim().parse::<i32>() {
-                    let status = std::process::Command::new("taskkill")
-                        .args(["/PID", &pid.to_string(), "/F"])
-                        .status()
-                        .ok();
-                    log(&format!(
-                        "down: taskkill /PID {pid} /F -> {:?}",
-                        status.map(|s| s.code())
-                    ));
+        // Remove the interface now that we hold its api handle.
+        if let Some(mut wgapi) = self.wgapi.take() {
+            match wgapi.remove_interface() {
+                Ok(()) => log("down: interface removed"),
+                Err(e) => {
+                    log(&format!("down: remove_interface failed: {e}"));
+                    // Dropping handle should still free the adapter.
                 }
             }
         }
+
+        log("down: done");
+        Ok(())
     }
-
-    // Best-effort: try to remove the interface directly too.
-    let name = ifname();
-    #[cfg(not(target_os = "macos"))]
-    let mut wgapi = WGApi::<defguard_wireguard_rs::Kernel>::new(name.clone())?;
-    #[cfg(target_os = "macos")]
-    let mut wgapi = WGApi::<defguard_wireguard_rs::Userspace>::new(name.clone())?;
-
-    match wgapi.remove_interface() {
-        Ok(()) => log("down: interface removed"),
-        Err(e) => log(&format!("down: remove_interface failed (daemon exit should free it): {e}")),
-    }
-
-    Ok(())
 }
 
 fn status_line() -> Result<String, Box<dyn std::error::Error>> {
@@ -363,14 +384,12 @@ fn status_line() -> Result<String, Box<dyn std::error::Error>> {
     Ok(state)
 }
 
-fn status() -> Result<(), Box<dyn std::error::Error>> {
-    println!("{}", status_line()?);
-    Ok(())
-}
-
-fn broadcast_status(listener: std::net::TcpListener) {
-    let mut clients: Vec<std::net::TcpStream> = Vec::new();
+fn broadcast_status(listener: TcpListener, running: Arc<AtomicBool>) {
+    let mut clients: Vec<TcpStream> = Vec::new();
     loop {
+        if !running.load(Ordering::SeqCst) {
+            break;
+        }
         // Accept new connections on the listener in the same loop we broadcast.
         listener.set_nonblocking(true).ok();
         loop {
@@ -403,51 +422,138 @@ fn broadcast_status(listener: std::net::TcpListener) {
     }
 }
 
-fn start_status_server() -> Result<(), Box<dyn std::error::Error>> {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
-    let port = listener.local_addr()?.port();
-    let port_file = exe_dir()?.join("talku-cli.port");
-    std::fs::write(&port_file, port.to_string())?;
+fn ctrl_port_path() -> Result<std::path::PathBuf, String> {
+    Ok(exe_dir()?.join("talku-cli.ctrl.port"))
+}
 
-    std::thread::spawn(move || broadcast_status(listener));
-    Ok(())
+fn write_pid() -> Result<(), String> {
+    let pid = std::process::id();
+    let pid_file = exe_dir()?.join("talku-cli.pid");
+    std::fs::write(&pid_file, pid.to_string())
+        .map_err(|e| format!("Failed to write pid file: {e}"))
+}
+
+fn handle_conn(daemon: Arc<Mutex<Daemon>>, mut stream: TcpStream) {
+    use std::io::{BufRead, BufReader, Write};
+
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .ok();
+    let mut reader = BufReader::new(stream.try_clone().ok().unwrap());
+    let mut line = String::new();
+    if reader.read_line(&mut line).is_err() {
+        return;
+    }
+    let cmd = line.trim();
+
+    let mut daemon = daemon.lock().unwrap();
+    let response = match cmd {
+        "up" => match daemon.up() {
+            Ok(()) => "ok".to_string(),
+            Err(e) => format!("error {e}"),
+        },
+        "down" => match daemon.down() {
+            Ok(()) => "ok".to_string(),
+            Err(e) => format!("error {e}"),
+        },
+        "status" => status_line().unwrap_or_else(|e| format!("error {e}")),
+        other => format!("error unknown command: {other}"),
+    };
+
+    let mut buf = response;
+    buf.push('\n');
+    let _ = stream.write_all(buf.as_bytes());
+}
+
+fn run_daemon() -> ExitCode {
+    let daemon = Arc::new(Mutex::new(Daemon::default()));
+
+    let listener = match TcpListener::bind("127.0.0.1:0") {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("failed to bind ctrl listener: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let port = match listener.local_addr() {
+        Ok(a) => a.port(),
+        Err(e) => {
+            eprintln!("failed to get ctrl port: {e}");
+            return ExitCode::from(1);
+        }
+    };
+
+    if let Ok(path) = ctrl_port_path() {
+        let _ = std::fs::write(&path, port.to_string());
+    }
+    let _ = write_pid();
+
+    log(&format!("daemon: listening on 127.0.0.1:{port}"));
+    println!("daemon ready on 127.0.0.1:{port}");
+
+    for stream in listener.incoming() {
+        match stream {
+            Ok(stream) => {
+                let daemon = daemon.clone();
+                std::thread::spawn(move || handle_conn(daemon, stream));
+            }
+            Err(e) => log(&format!("daemon: accept error: {e}")),
+        }
+    }
+
+    ExitCode::SUCCESS
 }
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
-        eprintln!("usage: talku-cli <up|down|status> [config-path]");
+        eprintln!("usage: talku-cli <daemon|up|down|status> [config-path]");
         return ExitCode::from(1);
     }
 
-    let result = match args[1].as_str() {
-        "up" => up(),
-        "down" => down(),
-        "status" => status(),
-        other => {
-            eprintln!("unknown command: {other}");
-            return ExitCode::from(1);
-        }
-    };
-
-    match result {
-        Ok(()) => {
-            if args[1].as_str() == "up" {
-                // Keep the process (and the leaked adapter + wstunnel handles)
-                // alive so the tunnel keeps running. The status server thread
-                // broadcasts handshake state every 2s. The adapter is removed on
-                // process exit.
-                loop {
-                    std::thread::sleep(std::time::Duration::from_secs(3600));
+    match args[1].as_str() {
+        "daemon" => run_daemon(),
+        "up" => {
+            let mut d = Daemon::default();
+            match d.up() {
+                Ok(()) => {
+                    println!("ok");
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    ExitCode::from(1)
                 }
             }
-            println!("ok");
-            ExitCode::SUCCESS
         }
-        Err(e) => {
-            eprintln!("error: {e}");
-            log(&format!("{} command FAILED: {e}", args[1]));
+        "down" => {
+            let mut d = Daemon::default();
+            match d.down() {
+                Ok(()) => {
+                    println!("ok");
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    ExitCode::from(1)
+                }
+            }
+        }
+        "status" => match status() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("error: {e}");
+                ExitCode::from(1)
+            }
+        },
+        other => {
+            eprintln!("unknown command: {other}");
             ExitCode::from(1)
         }
     }
+}
+
+fn status() -> Result<(), Box<dyn std::error::Error>> {
+    println!("{}", status_line()?);
+    Ok(())
 }
