@@ -399,7 +399,7 @@ fn broadcast_status(listener: std::net::TcpListener) {
             client.write_all(buf.as_bytes()).is_ok()
         });
 
-        std::thread::sleep(std::time::Duration::from_secs(2));
+        std::thread::sleep(std::time::Duration::from_secs(1));
     }
 }
 
