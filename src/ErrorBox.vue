@@ -15,10 +15,18 @@ const emit = defineEmits<{
             <div class="error-icon" aria-hidden="true">!</div>
             <p class="error-message">{{ message }}</p>
             <div class="error-actions">
-                <button type="button" class="btn btn-cancel" @click="emit('cancel')">
+                <button
+                    type="button"
+                    class="btn btn-cancel"
+                    @click="emit('cancel')"
+                >
                     Cancel
                 </button>
-                <button type="button" class="btn btn-retry" @click="emit('retry')">
+                <button
+                    type="button"
+                    class="btn btn-retry"
+                    @click="emit('retry')"
+                >
                     Retry
                 </button>
             </div>
@@ -33,17 +41,23 @@ const emit = defineEmits<{
     display: flex;
     align-items: center;
     justify-content: center;
-    background: rgba(0, 0, 0, 0.6);
+    background: rgba(0, 0, 0, 0.55);
+    border-radius: 12px;
+    overflow: hidden;
     z-index: 100;
 }
 
 .error-box {
     width: 300px;
-    max-width: 88vw;
-    padding: 20px;
-    border-radius: 16px;
-    background: #1d1d1f;
-    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+    max-width: 84vw;
+    padding: 28px 24px 20px;
+    border-radius: 24px;
+    background: rgba(26, 26, 30, 0.35);
+    backdrop-filter: blur(16px);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    box-shadow:
+        0 12px 40px rgba(0, 0, 0, 0.6),
+        inset 0 1px 0 rgba(255, 255, 255, 0.06);
     display: flex;
     flex-direction: column;
     align-items: center;
@@ -51,60 +65,76 @@ const emit = defineEmits<{
 }
 
 .error-icon {
-    width: 44px;
-    height: 44px;
+    width: 52px;
+    height: 52px;
     border-radius: 50%;
-    background: #b81a15;
+    background: radial-gradient(
+        circle at 30% 25%,
+        #ed4444 0%,
+        #b81a15 70%
+    );
     color: #fff;
-    font-size: 28px;
+    font-family: "Product Sans", "Roboto", sans-serif;
+    font-size: 30px;
     font-weight: 700;
+    line-height: 1;
     display: flex;
     align-items: center;
     justify-content: center;
+    box-shadow: 0 4px 18px rgba(184, 26, 21, 0.45);
 }
 
 .error-message {
     margin: 0;
-    color: #e8e8ea;
+    color: #d6d6db;
+    font-family: "Roboto", sans-serif;
     font-size: 14px;
-    line-height: 1.4;
+    line-height: 1.5;
     text-align: center;
     word-break: break-word;
-    max-height: 120px;
+    max-height: 104px;
     overflow-y: auto;
 }
 
 .error-actions {
     display: flex;
-    gap: 10px;
+    gap: 12px;
     width: 100%;
 }
 
 .btn {
     flex: 1;
-    padding: 9px 0;
+    padding: 10px 0;
     border: none;
-    border-radius: 10px;
+    border-radius: 12px;
+    font-family: "Roboto", sans-serif;
     font-size: 14px;
     font-weight: 600;
+    letter-spacing: 0.2px;
     cursor: pointer;
+    transition: transform 0.1s ease, background 0.2s ease;
+}
+
+.btn:active {
+    transform: scale(0.97);
 }
 
 .btn-cancel {
-    background: #2c2c2f;
+    background: rgba(255, 255, 255, 0.08);
     color: #cfcfd4;
 }
 
 .btn-cancel:hover {
-    background: #3a3a3e;
+    background: rgba(255, 255, 255, 0.14);
 }
 
 .btn-retry {
-    background: #0c2810;
-    color: #23a446;
+    background: linear-gradient(180deg, #1d7a38 0%, #145c28 100%);
+    color: #d9ffe4;
+    box-shadow: 0 4px 16px rgba(35, 164, 70, 0.35);
 }
 
 .btn-retry:hover {
-    background: #143c1c;
+    background: linear-gradient(180deg, #239347 0%, #1a6e32 100%);
 }
 </style>

@@ -51,6 +51,84 @@ fn talku_cli_dir() -> Result<std::path::PathBuf, String> {
         .ok_or_else(|| "Helper exe has no parent directory".to_string())
 }
 
+fn ctrl_port() -> Result<u16, String> {
+    let port_file = talku_cli_dir()?.join("talku-cli.ctrl.port");
+    std::fs::read_to_string(&port_file)
+        .map_err(|e| format!("Failed to read ctrl port file: {e}"))?
+        .trim()
+        .parse()
+        .map_err(|e| format!("Invalid ctrl port: {e}"))
+}
+
+fn is_daemon_alive() -> bool {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    use std::time::Duration;
+
+    let port = match ctrl_port() {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    let Ok(mut stream) = TcpStream::connect(("127.0.0.1", port)) else {
+        return false;
+    };
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .ok();
+    let _ = stream.write_all(b"status\n");
+    let mut buf = [0u8; 64];
+    stream.read(&mut buf).ok().is_some()
+}
+
+/// Make sure the elevated daemon is running. If it is not, elevate it once in
+/// the background (this is the only time a UAC prompt appears) and wait until
+/// its control socket is ready. Once the daemon stays alive, all later
+/// up/down/status commands go over loopback with no further elevation.
+fn ensure_daemon() -> Result<(), String> {
+    if is_daemon_alive() {
+        return Ok(());
+    }
+
+    elevate_in_background("daemon");
+
+    for _ in 0..50 {
+        if is_daemon_alive() {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+
+    Err("Failed to start the elevated helper".to_string())
+}
+
+fn send_command(cmd: &str) -> Result<String, String> {
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpStream;
+    use std::time::Duration;
+
+    ensure_daemon()?;
+    let port = ctrl_port()?;
+    let mut stream = TcpStream::connect(("127.0.0.1", port))
+        .map_err(|e| format!("Failed to connect to helper: {e}"))?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .map_err(|e| format!("Failed to set read timeout: {e}"))?;
+
+    let mut req = cmd.to_string();
+    req.push('\n');
+    stream
+        .write_all(req.as_bytes())
+        .map_err(|e| format!("Failed to send command: {e}"))?;
+
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    reader
+        .read_line(&mut line)
+        .map_err(|e| format!("Failed to read response: {e}"))?;
+
+    Ok(line.trim().to_string())
+}
+
 fn read_status_line() -> Result<String, String> {
     use std::io::{BufRead, BufReader};
     use std::net::TcpStream;
@@ -81,7 +159,10 @@ fn read_status_line() -> Result<String, String> {
 }
 
 fn connect_vpn() -> Result<(), String> {
-    elevate_in_background("up");
+    let response = send_command("up")?;
+    if response.starts_with("error") {
+        return Err(response);
+    }
     Ok(())
 }
 
@@ -92,7 +173,10 @@ fn get_vpn_status() -> Result<String, String> {
 
 #[tauri::command]
 fn disconnect_vpn() -> Result<(), String> {
-    elevate_in_background("down");
+    let response = send_command("down")?;
+    if response.starts_with("error") {
+        return Err(response);
+    }
     Ok(())
 }
 
@@ -105,7 +189,7 @@ async fn check_config_and_connect() -> Result<(), String> {
         .await
         .map_err(|e| e.to_string())?;
 
-    connect_vpn();
+    connect_vpn()?;
 
     Ok(())
 }
