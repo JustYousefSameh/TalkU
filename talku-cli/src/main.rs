@@ -3,6 +3,7 @@ use std::process::ExitCode;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
@@ -12,6 +13,11 @@ use defguard_wireguard_rs::{
 };
 
 const DEFAULT_CONFIG: &str = "talkuwg.conf";
+
+/// Local UDP port that the wstunnel client tunnel endpoint binds once its
+/// WebSocket connection to the remote server is established. The WireGuard
+/// peer endpoint points here.
+const TUNNEL_PORT: u16 = 51820;
 
 fn ifname() -> String {
     if cfg!(target_os = "linux") || cfg!(target_os = "freebsd") {
@@ -223,7 +229,7 @@ fn start_wstunnel() -> Result<std::process::Child, String> {
     let args = [
         "client",
         "-L",
-        "udp://51820:localhost:51820?timeout_sec=0",
+        &format!("udp://{TUNNEL_PORT}:localhost:{TUNNEL_PORT}?timeout_sec=0"),
         "wss://57.131.34.226:443",
     ];
 
@@ -242,6 +248,24 @@ fn start_wstunnel() -> Result<std::process::Child, String> {
         .map_err(|e| format!("Failed to start wstunnel: {e}"))
 }
 
+/// Wait until something has bound the local UDP `port`, i.e. wstunnel's tunnel
+/// endpoint is listening. A throwaway UDP socket cannot bind a port that is
+/// already in use, so `bind` succeeding means the port is still free and a
+/// `bind` failure means wstunnel owns it (or the tunnel is being established).
+fn wait_for_udp_port(port: u16, timeout: Duration) -> Result<(), String> {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if std::net::UdpSocket::bind(("127.0.0.1", port)).is_err() {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    Err(format!(
+        "no process bound 127.0.0.1:{port} within {}s",
+        timeout.as_secs()
+    ))
+}
+
 /// Holds all long-lived state for the daemon so it can bring the tunnel up and
 /// down on demand without exiting (which would otherwise close the leaked
 /// WireGuardNT adapter handle). Keeping the WGApi alive inside the daemon is
@@ -251,6 +275,11 @@ struct Daemon {
     wgapi: Option<WGApi<defguard_wireguard_rs::Kernel>>,
     wstunnel: Option<std::process::Child>,
     status_listener: Option<TcpListener>,
+    // Runs the slow WireGuardNT adapter teardown off the ctrl-handler thread
+    // so `down()` (and hence UI disconnect) returns fast. `up()` joins any
+    // in-flight teardown before creating a fresh interface, so the two never
+    // race each other.
+    teardown: Option<std::thread::JoinHandle<()>>,
     // Serializes all access to the WireGuard adapter. The status broadcast
     // thread opens/reads the adapter every second; without this lock its
     // `get_config` can race `up()`'s `set_config` and fail with ERROR_BAD_LENGTH.
@@ -262,6 +291,7 @@ impl Default for Daemon {
             wgapi: None,
             wstunnel: None,
             status_listener: None,
+            teardown: None,
             api_lock: Arc::new(Mutex::new(())),
         }
     }
@@ -291,13 +321,28 @@ impl Daemon {
             }
             return Ok(());
         }
-        let _api_guard = self.api_lock.lock().unwrap();
+        let _api_guard = match self.api_lock.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        let start = Instant::now();
         log("up: start");
 
+        // If a previous `down` is still tearing down the WireGuardNT adapter
+        // in the background, wait for it so we don't race the create below.
+        // The teardown usually has a head start (disconnect happened earlier),
+        // so this rarely blocks for long.
+        if let Some(t) = self.teardown.take() {
+            let _ = t.join();
+            log("up: waited for previous teardown");
+        }
+
         // Reap our own stale child handle if a previous `up` died part-way.
+        // Kill but don't block on `wait()` (wstunnel exits slowly); the
+        // `kill_stale_wstunnel()` force-kill below handles any remainder.
         if let Some(mut child) = self.wstunnel.take() {
             let _ = child.kill();
-            let _ = child.wait();
+            drop(child);
             log("up: cleaned stale wstunnel handle");
         }
 
@@ -314,14 +359,38 @@ impl Daemon {
         #[cfg(target_os = "macos")]
         let mut wgapi = WGApi::<defguard_wireguard_rs::Userspace>::new(name.clone())?;
 
-wgapi.create_interface()?;
-        log("up: interface created");
+        wgapi.create_interface()?;
+        log(&format!("up: interface created in {:?}", start.elapsed()));
+
+        // Start wstunnel BEFORE configuring the interface. Its local UDP
+        // tunnel endpoint (TUNNEL_PORT) only gets bound once its WebSocket
+        // connection to the remote server is up, which is the slow part.
+        // Spawning it first lets that happen while we prepare the adapter;
+        // then `wait_for_udp_port` makes sure the endpoint is listening before
+        // we configure the WireGuard peer. Otherwise the first handshake
+        // fires into an unbound port, fails, and WireGuard backs off
+        // ~1s, 2s, 4s... which is what made connecting take ~5-6s.
+        match start_wstunnel() {
+            Ok(child) => {
+                self.wstunnel = Some(child);
+                log(&format!("up: wstunnel started in {:?}", start.elapsed()));
+            }
+            Err(e) => {
+                log(&format!("up: wstunnel failed to start: {e}"));
+                // Roll back so a retry brings everything up from scratch instead
+                // of leaving us in an "already up" state that never connects.
+                if let Err(re) = wgapi.remove_interface() {
+                    log(&format!("up: rollback remove_interface failed: {re}"));
+                }
+                return Err(e.into());
+            }
+        }
 
         let mut peers = Vec::new();
         for p in &cfg.peers {
             let public_key = p.public_key.as_deref().ok_or("Peer missing PublicKey")?;
             let peer_key: Key = Key::from_str(public_key).map_err(|e| format!("Bad PublicKey: {e}"))?;
-            let endpoint: SocketAddr = "127.0.0.1:51820".parse().unwrap();
+            let endpoint: SocketAddr = format!("127.0.0.1:{TUNNEL_PORT}").parse().unwrap();
 
             let mut peer = Peer::new(peer_key);
             peer.endpoint = Some(endpoint);
@@ -352,8 +421,20 @@ wgapi.create_interface()?;
             fwmark: None,
         };
 
+        // Block until wstunnel's tunnel endpoint is actually listening. If the
+        // tunnel never comes up, fail loudly instead of silently never
+        // handshaking (and roll everything back).
+        wait_for_udp_port(TUNNEL_PORT, Duration::from_secs(20)).map_err(|e| {
+            log(&format!(
+                "up: tunnel port {TUNNEL_PORT} not ready after {:?}: {e}",
+                start.elapsed()
+            ));
+            e
+        })?;
+        log(&format!("up: tunnel port ready in {:?}", start.elapsed()));
+
         wgapi.configure_interface(&interface_config)?;
-        log("up: interface configured");
+        log(&format!("up: interface configured in {:?}", start.elapsed()));
         wgapi.configure_peer_routing(&interface_config.peers)?;
 
         if !cfg.dns.is_empty() {
@@ -363,29 +444,12 @@ wgapi.create_interface()?;
                 .map(|d| d.parse())
                 .collect::<Result<Vec<_>, _>>()?;
             wgapi.configure_dns(&dns_ips, &[])?;
-            log("up: dns configured");
+            log(&format!("up: dns configured in {:?}", start.elapsed()));
         }
 
         // Keep the api handle alive for the lifetime of this daemon process so
         // the WireGuardNT adapter persists while we are "up".
         self.wgapi = Some(wgapi);
-
-        // Start wstunnel. Keep its handle so the tunnel keeps running.
-        match start_wstunnel() {
-            Ok(child) => {
-                self.wstunnel = Some(child);
-                log("up: wstunnel started");
-            }
-            Err(e) => {
-                log(&format!("up: wstunnel failed to start: {e}"));
-                // Roll back so a retry brings everything up from scratch instead
-                // of leaving us in an "already up" state that never connects.
-                if let Some(mut wgapi) = self.wgapi.take() {
-                    let _ = wgapi.remove_interface();
-                }
-                return Err(e.into());
-            }
-        }
 
         // Start the loopback status server if not already running.
         if self.status_listener.is_none() {
@@ -402,38 +466,70 @@ wgapi.create_interface()?;
             log("up: status server started");
         }
 
-        log("up: done");
+        log(&format!("up: done in {:?}", start.elapsed()));
         Ok(())
     }
 
     fn down(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let _api_guard = self.api_lock.lock().unwrap();
+        let _api_guard = match self.api_lock.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        let start = Instant::now();
         log("down: start");
 
-        // Kill wstunnel by its own handle.
-        if let Some(mut child) = self.wstunnel.take() {
+        // Kill wstunnel by its own handle, but don't block on `wait()` —
+        // wstunnel can take ~4s to fully exit. The next `up()` force-kills
+        // any lingering wstunnel by name, so detaching here keeps `down()`
+        // (and thus UI disconnect -> reconnect) fast.
+        let wstunnel_killed = if let Some(mut child) = self.wstunnel.take() {
+            log(&format!("down: wstunnel child killed (elapsed {:?})", start.elapsed()));
             let _ = child.kill();
-            let _ = child.wait();
-            log("down: wstunnel killed");
-        }
+            drop(child);
+            true
+        } else {
+            log("down: no wstunnel child to kill");
+            false
+        };
 
-        // Remove the interface now that we hold its api handle.
-        if let Some(mut wgapi) = self.wgapi.take() {
-            match wgapi.remove_interface() {
-                Ok(()) => log("down: interface removed"),
-                Err(e) => {
-                    log(&format!("down: remove_interface failed: {e}"));
-                    // Dropping handle should still free the adapter.
-                }
-            }
-        }
+        // Remove the interface now that we hold its api handle. WireGuardNT
+        // adapter teardown (closing the adapter) can take ~4s, so run it on a
+        // background thread and return to the client immediately — this is what
+        // makes disconnect -> reconnect feel instant. The teardown thread
+        // re-acquires `api_lock` for its whole duration so the status reader
+        // cannot `get_config` on the adapter while it's being closed (which
+        // would otherwise race and panic). `up()` joins this thread before
+        // recreating the adapter, so create never races it either.
+        let interface_removed = if let Some(wgapi) = self.wgapi.take() {
+            log(&format!("down: removing interface (elapsed {:?})", start.elapsed()));
+            let lock = self.api_lock.clone();
+            self.teardown = Some(std::thread::spawn(move || {
+                let _guard = lock.lock();
+                let mut wgapi = wgapi;
+                let _ = wgapi.remove_interface();
+                log("down: teardown thread done");
+            }));
+            log(&format!("down: teardown dispatched (elapsed {:?})", start.elapsed()));
+            true
+        } else {
+            log("down: no interface to remove");
+            false
+        };
 
         // Safety net: clear any orphaned wstunnel/adapter left by a crashed
-        // daemon that we never owned a handle to.
-        kill_stale_wstunnel();
-        cleanup_stale_interface();
+        // daemon that we never owned a handle to. When we just tore down our
+        // own resources cleanly this is redundant, and the create+remove probe
+        // in `cleanup_stale_interface` is slow (~1s), which made a quick
+        // disconnect -> reconnect feel unresponsive. Only fall through to it
+        // when something was already missing.
+        if !interface_removed {
+            cleanup_stale_interface();
+        }
+        if !wstunnel_killed {
+            kill_stale_wstunnel();
+        }
 
-        log("down: done");
+        log(&format!("down: done in {:?}", start.elapsed()));
         Ok(())
     }
 }
@@ -486,14 +582,22 @@ fn broadcast_status(api_lock: Arc<Mutex<()>>, listener: TcpListener, running: Ar
         }
 
         let line = {
-            let _guard = api_lock.lock().unwrap();
-            match status_line() {
-                Ok(l) => l,
-                Err(e) => {
-                    let msg = format!("error {e}");
+            let _guard = match api_lock.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(), // recover from a poisoned lock
+            };
+            // `status_line` opens/reads the adapter; guard against a panic
+            // (e.g. racing teardown) so it can't kill or poison this thread.
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                status_line()
+            }));
+            match result {
+                Ok(Ok(l)) => l,
+                Ok(Err(e)) => {
                     log(&format!("status read failed: {e}"));
-                    msg
+                    format!("error {e}")
                 }
+                Err(_) => "error status".to_string(),
             }
         };
         clients.retain(|mut client| {
@@ -531,21 +635,41 @@ fn handle_conn(daemon: Arc<Mutex<Daemon>>, mut stream: TcpStream) {
     }
     let cmd = line.trim();
 
-    let mut daemon = daemon.lock().unwrap();
-    let response = match cmd {
-        "up" => match daemon.up() {
-            Ok(()) => "ok".to_string(),
-            Err(e) => format!("error {e}"),
-        },
-        "down" => match daemon.down() {
-            Ok(()) => "ok".to_string(),
-            Err(e) => format!("error {e}"),
-        },
-        "status" => {
-            let _guard = daemon.api_lock.lock().unwrap();
-            status_line().unwrap_or_else(|e| format!("error {e}"))
+    // Liveness probe: answered instantly, before taking the daemon mutex or
+    // api_lock, so the UI can detect a running daemon even mid-teardown
+    // (when the adapter close holds api_lock for ~4s).
+    if cmd == "ping" {
+        let _ = stream.write_all(b"pong\n");
+        return;
+    }
+
+    let mut daemon = match daemon.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(), // poisoned by an earlier panic; recover and continue
+    };
+    let response = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = &mut *daemon;
+        match cmd {
+            "up" => match daemon.up() {
+                Ok(()) => "ok".to_string(),
+                Err(e) => format!("error {e}"),
+            },
+            "down" => match daemon.down() {
+                Ok(()) => "ok".to_string(),
+                Err(e) => format!("error {e}"),
+            },
+            "status" => {
+                let _guard = match daemon.api_lock.lock() {
+                    Ok(g) => g,
+                    Err(p) => p.into_inner(),
+                };
+                status_line().unwrap_or_else(|e| format!("error {e}"))
+            }
+            other => format!("error unknown command: {other}"),
         }
-        other => format!("error unknown command: {other}"),
+    })) {
+        Ok(resp) => resp,
+        Err(_) => "error internal".to_string(),
     };
 
     let mut buf = response;
@@ -554,6 +678,27 @@ fn handle_conn(daemon: Arc<Mutex<Daemon>>, mut stream: TcpStream) {
 }
 
 fn run_daemon() -> ExitCode {
+    // Capture panic messages and stderr into the log file so failures in the
+    // daemon (spawned hidden/elevated) are visible instead of silently dropped.
+    let log_path = exe_dir()
+        .map(|d| d.join("talku-cli.panic.log"))
+        .unwrap_or_else(|_| std::path::PathBuf::from("talku-cli.panic.log"));
+    let hook_path = log_path.clone();
+    std::panic::set_hook(Box::new(move |info| {
+        use std::io::Write;
+        let msg = format!("PANIC: {info}\n");
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&hook_path)
+        {
+            let _ = f.write_all(msg.as_bytes());
+        }
+    }));
+    if let Ok(f) = std::fs::OpenOptions::new().create(true).append(true).open(&log_path) {
+        let _ = f; // just ensure the file is creatable
+    }
+
     let daemon = Arc::new(Mutex::new(Daemon::default()));
 
     let listener = match TcpListener::bind("127.0.0.1:0") {

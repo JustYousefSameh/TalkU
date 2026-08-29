@@ -1,6 +1,7 @@
 mod config;
 
 use std::fs;
+use std::sync::Mutex;
 
 use tauri::{
     menu::{Menu, MenuItem},
@@ -73,9 +74,9 @@ fn is_daemon_alive() -> bool {
         return false;
     };
     stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
-    let _ = stream.write_all(b"status\n");
-    let mut buf = [0u8; 64];
-    stream.read(&mut buf).ok().is_some()
+    let _ = stream.write_all(b"ping\n");
+    let mut buf = [0u8; 16];
+    stream.read(&mut buf).ok().map(|_| ()).is_some()
 }
 
 /// Make sure the elevated daemon is running. If it is not, elevate it once in
@@ -83,6 +84,17 @@ fn is_daemon_alive() -> bool {
 /// its control socket is ready. Once the daemon stays alive, all later
 /// up/down/status commands go over loopback with no further elevation.
 fn ensure_daemon() -> Result<(), String> {
+    if is_daemon_alive() {
+        return Ok(());
+    }
+
+    // Single-flight: concurrent connect/disconnect must not both elevate and
+    // trigger a second UAC prompt. Only the first caller actually elevates;
+    // the rest simply wait for the daemon to come up.
+    static ELEVATING: Mutex<()> = Mutex::new(());
+    let _gate = ELEVATING.lock().unwrap();
+
+    // Re-check under the gate in case someone else already started it.
     if is_daemon_alive() {
         return Ok(());
     }
