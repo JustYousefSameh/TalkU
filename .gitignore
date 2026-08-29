@@ -53,3 +53,7 @@ pids
 debug.log
 TODO.md
 .aider*
+
+# build output
+dist
+targetARYic8/

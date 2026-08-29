@@ -165,13 +165,17 @@ fn connect_vpn() -> Result<(), String> {
 }
 
 #[tauri::command]
-fn get_vpn_status() -> Result<String, String> {
-    read_status_line()
+async fn get_vpn_status() -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(read_status_line)
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn disconnect_vpn() -> Result<(), String> {
-    let response = send_command("down")?;
+async fn disconnect_vpn() -> Result<(), String> {
+    let response = tauri::async_runtime::spawn_blocking(|| send_command("down"))
+        .await
+        .map_err(|e| e.to_string())??;
     if response.starts_with("error") {
         return Err(response);
     }
@@ -187,7 +191,7 @@ async fn check_config_and_connect() -> Result<(), String> {
         .await
         .map_err(|e| e.to_string())?;
 
-    let _ = connect_vpn();
+    let _ = tauri::async_runtime::spawn_blocking(connect_vpn).await;
 
     Ok(())
 }
