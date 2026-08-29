@@ -18,7 +18,6 @@ const hovered = ref(false);
 
 const shockwave = ref(false);
 const pop = ref(false);
-const buttonRef = ref<HTMLButtonElement | null>(null);
 
 let shockwaveTimer: number | undefined;
 
@@ -279,7 +278,7 @@ async function pollUntilConnected(): Promise<Status> {
 }
 
 .toggle.pop {
-    animation: toggle-pop 0.25s ease-out;
+    animation: toggle-pop 0.3s ease-out;
 }
 
 @keyframes toggle-pop {
@@ -287,7 +286,7 @@ async function pollUntilConnected(): Promise<Status> {
         transform: scale(1);
     }
     40% {
-        transform: scale(1.15);
+        transform: scale(1.06);
     }
     100% {
         transform: scale(1);

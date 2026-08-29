@@ -14,7 +14,11 @@ const colors: Record<Status, [number, number, number]> = {
     connected: [0x08, 0x2b, 0x09],
 };
 
-const TRANSITION_MS = 2150;
+// Delay before the color transition starts, matching the 300ms shockwave pop
+// delay in CustomSliderButton so the background gets "painted" as the
+// shockwave expands.
+const SHOCKWAVE_DELAY_MS = 300;
+const TRANSITION_MS = 1500;
 
 const VERT = `#version 300 es
 layout(location = 0) in vec2 aPos;
@@ -73,8 +77,8 @@ interface Ctx {
     from: [number, number, number];
     target: [number, number, number];
     progress: number;
+    transitionStart: number;
     raf: number;
-    prevTime: number;
 }
 
 let ctx: Ctx | null = null;
@@ -107,12 +111,12 @@ function frame(now: number) {
     const c = ctx;
     if (!c) return;
 
-    const dt = now - c.prevTime;
-    c.prevTime = now;
-
-    if (c.progress < 1) {
-        c.progress = Math.min(1, c.progress + dt / TRANSITION_MS);
-        const eased = 1 - Math.pow(1 - c.progress, 3);
+    if (c.progress < 1 && now >= c.transitionStart) {
+        const elapsed = now - c.transitionStart;
+        // Ease in like the shockwave: fast at first, then decelerating.
+        const raw = Math.min(1, elapsed / TRANSITION_MS);
+        const eased = 1 - Math.pow(1 - raw, 3);
+        c.progress = raw;
         c.gl.uniform1f(c.uProgress, eased);
     }
 
@@ -159,8 +163,8 @@ function init() {
         from: target,
         target,
         progress: 1,
+        transitionStart: performance.now(),
         raf: 0,
-        prevTime: performance.now(),
     };
 
     pushColor(ctx.uFromColor, ctx.from);
@@ -173,11 +177,28 @@ function init() {
 
 function setTarget(status: Status) {
     if (!ctx) return;
-    ctx.from = ctx.target;
-    ctx.target = colors[status];
+
+    if (status === "connected") {
+        // Turn the current background (the yellow "connecting" tint) into green,
+        // synced to the shockwave so it reads as the shockwave painting it.
+        ctx.from = ctx.target;
+        ctx.target = colors["connected"];
+    } else {
+        // Non-connected states: transition toward the status color.
+        ctx.from = ctx.target;
+        ctx.target = colors[status];
+    }
     pushColor(ctx.uFromColor, ctx.from);
     pushColor(ctx.uTargetColor, ctx.target);
     ctx.progress = 0;
+    // Reset the shader progress now so the held frame renders the exact
+    // `from` color during the delay (otherwise the stale uProgress from the
+    // previous transition leaks through, flashing the target color early).
+    ctx.gl.uniform1f(ctx.uProgress, 0);
+    // When connecting, wait for the shockwave pop before painting the
+    // background (matches the 300ms pop delay). Other transitions are instant.
+    ctx.transitionStart =
+        performance.now() + (status === "connected" ? SHOCKWAVE_DELAY_MS : 0);
 }
 
 function resize() {
