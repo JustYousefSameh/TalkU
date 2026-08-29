@@ -112,11 +112,18 @@ fn ensure_daemon() -> Result<(), String> {
 }
 
 fn send_command(cmd: &str) -> Result<String, String> {
+    ensure_daemon()?;
+    send_command_impl(cmd)
+}
+
+/// Send a command over the ctrl socket without ensuring the daemon is running.
+/// Used for best-effort work (like disconnect-on-exit) where triggering a UAC
+/// elevation would be undesirable.
+fn send_command_impl(cmd: &str) -> Result<String, String> {
     use std::io::{BufRead, BufReader, Write};
     use std::net::TcpStream;
     use std::time::Duration;
 
-    ensure_daemon()?;
     let port = ctrl_port()?;
     let mut stream = TcpStream::connect(("127.0.0.1", port))
         .map_err(|e| format!("Failed to connect to helper: {e}"))?;
@@ -137,6 +144,20 @@ fn send_command(cmd: &str) -> Result<String, String> {
         .map_err(|e| format!("Failed to read response: {e}"))?;
 
     Ok(line.trim().to_string())
+}
+
+/// Best-effort clean disconnect used right before the app exits. Only sends
+/// `down` if a daemon is already alive (no UAC trigger), and never blocks the
+/// exit on failures — the daemon cleans up stale state on its next `up`.
+fn disconnect_before_exit() -> Result<(), String> {
+    if !is_daemon_alive() {
+        return Ok(()); // nothing to tear down
+    }
+    match send_command_impl("down") {
+        Ok(resp) if resp.starts_with("error") => Err(resp),
+        Ok(_) => Ok(()),
+        Err(e) => Err(e),
+    }
 }
 
 fn read_status_line() -> Result<String, String> {
@@ -289,6 +310,9 @@ pub fn run() {
                         }
                     }
                     "exit" => {
+                        // Disconnect cleanly (if connected) before exiting so the
+                        // tunnel/adapter is torn down rather than left running.
+                        let _ = disconnect_before_exit();
                         app.exit(0);
                     }
                     _ => {}
