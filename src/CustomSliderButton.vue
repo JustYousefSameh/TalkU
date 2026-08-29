@@ -42,28 +42,53 @@ type Action = "connect" | "disconnect" | null;
 
 let lastAction: Action = null;
 
+let busy = false;
+
+async function reconcileStatus(): Promise<Status> {
+    try {
+        const line = await invoke<string>("get_vpn_status");
+        if (line.startsWith("connected")) return "connected";
+    } catch {
+        // Status server unreachable -> genuinely disconnected.
+    }
+    return "disconnected";
+}
+
 async function disconnect() {
+    if (busy) return;
+    busy = true;
     try {
         await invoke("disconnect_vpn");
         emit("update:status", "disconnected");
     } catch (err) {
         emit("error", String(err));
         emit("update:status", "connected");
+    } finally {
+        busy = false;
     }
 }
 
 async function connect() {
+    if (busy) return;
+    busy = true;
     try {
         await invoke("check_config_and_connect");
         const result = await pollUntilConnected();
         emit("update:status", result);
     } catch (err) {
-        emit("error", String(err));
-        emit("update:status", "disconnected");
+        if ((await reconcileStatus()) === "connected") {
+            emit("update:status", "connected");
+        } else {
+            emit("error", String(err));
+            emit("update:status", "disconnected");
+        }
+    } finally {
+        busy = false;
     }
 }
 
 async function nextState() {
+    if (busy || props.status === "connecting") return;
     if (props.status === "connected") {
         lastAction = "disconnect";
         emit("update:status", "disconnected");
@@ -76,6 +101,7 @@ async function nextState() {
 }
 
 async function retryLastAction() {
+    if (props.status === "connecting") return;
     if (lastAction === "disconnect") {
         emit("update:status", "disconnected");
         await disconnect();
