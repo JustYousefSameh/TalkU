@@ -161,32 +161,12 @@ fn disconnect_before_exit() -> Result<(), String> {
 }
 
 fn read_status_line() -> Result<String, String> {
-    use std::io::{BufRead, BufReader};
-    use std::net::TcpStream;
-    use std::time::Duration;
-
-    let port_file = talku_cli_dir()?.join("talku-cli.port");
-    let port: u16 = std::fs::read_to_string(&port_file)
-        .map_err(|e| format!("Failed to read status port file: {e}"))?
-        .trim()
-        .parse()
-        .map_err(|e| format!("Invalid status port: {e}"))?;
-
-    let stream = TcpStream::connect(("127.0.0.1", port))
-        .map_err(|e| format!("Failed to connect to status server: {e}"))?;
-    stream
-        .set_read_timeout(Some(Duration::from_secs(3)))
-        .map_err(|e| format!("Failed to set read timeout: {e}"))?;
-
-    let mut reader = BufReader::new(stream);
-    let mut line = String::new();
-    reader
-        .read_line(&mut line)
-        .map_err(|e| format!("Failed to read status line: {e}"))?;
-
+    // Status reads reuse the daemon's single control socket (the "status"
+    // command is served there), so there is no need for a separate status
+    // broadcast port/file any more.
+    let line = send_command_impl("status")?;
     println!("{}", line);
-
-    Ok(line.trim().to_string())
+    Ok(line)
 }
 
 fn connect_vpn() -> Result<(), String> {

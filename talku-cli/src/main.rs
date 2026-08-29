@@ -1,7 +1,6 @@
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::process::ExitCode;
 use std::str::FromStr;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -274,15 +273,14 @@ fn wait_for_udp_port(port: u16, timeout: Duration) -> Result<(), String> {
 struct Daemon {
     wgapi: Option<WGApi<defguard_wireguard_rs::Kernel>>,
     wstunnel: Option<std::process::Child>,
-    status_listener: Option<TcpListener>,
     // Runs the slow WireGuardNT adapter teardown off the ctrl-handler thread
     // so `down()` (and hence UI disconnect) returns fast. `up()` joins any
     // in-flight teardown before creating a fresh interface, so the two never
     // race each other.
     teardown: Option<std::thread::JoinHandle<()>>,
-    // Serializes all access to the WireGuard adapter. The status broadcast
-    // thread opens/reads the adapter every second; without this lock its
-    // `get_config` can race `up()`'s `set_config` and fail with ERROR_BAD_LENGTH.
+    // Serializes all access to the WireGuard adapter. The status command
+    // reads the adapter under this lock so it can't race `up()`'s
+    // `set_config` and fail with ERROR_BAD_LENGTH.
     api_lock: Arc<Mutex<()>>,
 }
 impl Default for Daemon {
@@ -290,7 +288,6 @@ impl Default for Daemon {
         Self {
             wgapi: None,
             wstunnel: None,
-            status_listener: None,
             teardown: None,
             api_lock: Arc::new(Mutex::new(())),
         }
@@ -451,21 +448,6 @@ impl Daemon {
         // the WireGuardNT adapter persists while we are "up".
         self.wgapi = Some(wgapi);
 
-        // Start the loopback status server if not already running.
-        if self.status_listener.is_none() {
-            let listener = TcpListener::bind("127.0.0.1:0")?;
-            let port = listener.local_addr()?.port();
-            let port_file = exe_dir()?.join("talku-cli.port");
-            std::fs::write(&port_file, port.to_string())?;
-
-            let running = Arc::new(AtomicBool::new(true));
-            let thread_listener = listener.try_clone()?;
-            let api_lock = self.api_lock.clone();
-            std::thread::spawn(move || broadcast_status(api_lock, thread_listener, running));
-            self.status_listener = Some(listener);
-            log("up: status server started");
-        }
-
         log(&format!("up: done in {:?}", start.elapsed()));
         Ok(())
     }
@@ -560,55 +542,6 @@ fn status_line() -> Result<String, Box<dyn std::error::Error>> {
         _ => "not_connected".to_string(),
     };
     Ok(state)
-}
-
-fn broadcast_status(api_lock: Arc<Mutex<()>>, listener: TcpListener, running: Arc<AtomicBool>) {
-    let mut clients: Vec<TcpStream> = Vec::new();
-    loop {
-        if !running.load(Ordering::SeqCst) {
-            break;
-        }
-        // Accept new connections on the listener in the same loop we broadcast.
-        listener.set_nonblocking(true).ok();
-        loop {
-            match listener.accept() {
-                Ok((stream, _addr)) => {
-                    stream.set_nonblocking(true).ok();
-                    clients.push(stream);
-                }
-                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
-                Err(_) => break,
-            }
-        }
-
-        let line = {
-            let _guard = match api_lock.lock() {
-                Ok(g) => g,
-                Err(p) => p.into_inner(), // recover from a poisoned lock
-            };
-            // `status_line` opens/reads the adapter; guard against a panic
-            // (e.g. racing teardown) so it can't kill or poison this thread.
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                status_line()
-            }));
-            match result {
-                Ok(Ok(l)) => l,
-                Ok(Err(e)) => {
-                    log(&format!("status read failed: {e}"));
-                    format!("error {e}")
-                }
-                Err(_) => "error status".to_string(),
-            }
-        };
-        clients.retain(|mut client| {
-            use std::io::Write;
-            let mut buf = line.clone();
-            buf.push('\n');
-            client.write_all(buf.as_bytes()).is_ok()
-        });
-
-        std::thread::sleep(std::time::Duration::from_secs(1));
-    }
 }
 
 fn ctrl_port_path() -> Result<std::path::PathBuf, String> {
