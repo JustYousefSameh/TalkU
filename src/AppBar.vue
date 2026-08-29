@@ -1,15 +1,7 @@
 <script setup lang="ts">
 import { Settings, Minus, X } from "lucide-vue-next";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import {
-    warn,
-    debug,
-    trace,
-    info,
-    error,
-    attachConsole,
-    attachLogger,
-} from "@tauri-apps/plugin-log";
+import { info } from "@tauri-apps/plugin-log";
 
 // Minimize to tray when the close button is pressed
 async function handleClose() {

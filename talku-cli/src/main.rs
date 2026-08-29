@@ -4,6 +4,9 @@ use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+
 use defguard_wireguard_rs::{
     key::Key, net::IpAddrMask, peer::Peer, InterfaceConfiguration, WGApi, WireguardInterfaceApi,
 };
@@ -161,6 +164,61 @@ fn log(msg: &str) {
     }
 }
 
+/// Kill any orphaned `wstunnel.exe` left behind by a previous daemon that
+/// exited without running `down` (otherwise port 51820 stays bound and a fresh
+/// tunnel cannot start). Also reaps our own stale child handle if present.
+fn kill_stale_wstunnel() {
+    #[cfg(target_os = "windows")]
+    {
+        use std::process::Stdio;
+        let mut cmd = std::process::Command::new("taskkill");
+        cmd.args(["/F", "/IM", "wstunnel.exe"])
+            .creation_flags(0x08000000) // CREATE_NO_WINDOW: don't flash a console
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        if cmd.status().map(|s| s.success()).unwrap_or(false) {
+            log("cleanup: killed stale wstunnel process");
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        use std::process::Stdio;
+        if std::process::Command::new("pkill")
+            .args(["-f", "wstunnel"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+        {
+            log("cleanup: killed stale wstunnel process");
+        }
+    }
+}
+
+/// Remove any leftover `TalkU` WireGuard adapter from a previous session.
+/// Opening the existing adapter and closing the handle (via `remove_interface`)
+/// frees it, because WireGuardNT deletes the adapter once the last handle drops.
+fn cleanup_stale_interface() {
+    let name = ifname();
+    let mut wgapi = match WGApi::<defguard_wireguard_rs::Kernel>::new(name.clone()) {
+        Ok(a) => a,
+        Err(e) => {
+            log(&format!("cleanup: cannot open wg api: {e}"));
+            return;
+        }
+    };
+    match wgapi.create_interface() {
+        Ok(()) => {
+            let _ = wgapi.remove_interface();
+            log("cleanup: removed stale wireguard adapter");
+        }
+        Err(e) => {
+            log(&format!("cleanup: no stale wireguard adapter: {e}"));
+        }
+    }
+}
+
 fn start_wstunnel() -> Result<std::process::Child, String> {
     let args = [
         "client",
@@ -193,6 +251,10 @@ struct Daemon {
     wgapi: Option<WGApi<defguard_wireguard_rs::Kernel>>,
     wstunnel: Option<std::process::Child>,
     status_listener: Option<TcpListener>,
+    // Serializes all access to the WireGuard adapter. The status broadcast
+    // thread opens/reads the adapter every second; without this lock its
+    // `get_config` can race `up()`'s `set_config` and fail with ERROR_BAD_LENGTH.
+    api_lock: Arc<Mutex<()>>,
 }
 impl Default for Daemon {
     fn default() -> Self {
@@ -200,6 +262,7 @@ impl Default for Daemon {
             wgapi: None,
             wstunnel: None,
             status_listener: None,
+            api_lock: Arc::new(Mutex::new(())),
         }
     }
 }
@@ -211,9 +274,38 @@ impl Daemon {
 
     fn up(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         if self.is_up() {
+            log("up: already up");
+            // The adapter is up. If the tunnel child died since then, restart it
+            // so a retry can actually reconnect instead of "already up" but dead.
+            if let Some(child) = self.wstunnel.as_mut() {
+                if child.try_wait().ok().flatten().is_some() {
+                    log("up: wstunnel died, restarting");
+                    let new_child = start_wstunnel().map_err(|e| {
+                        let msg = format!("wstunnel restart failed: {e}");
+                        log(&msg);
+                        msg
+                    })?;
+                    self.wstunnel = Some(new_child);
+                    log("up: wstunnel restarted");
+                }
+            }
             return Ok(());
         }
+        let _api_guard = self.api_lock.lock().unwrap();
         log("up: start");
+
+        // Reap our own stale child handle if a previous `up` died part-way.
+        if let Some(mut child) = self.wstunnel.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+            log("up: cleaned stale wstunnel handle");
+        }
+
+        // Make sure no leftover wstunnel or WireGuard adapter is still around
+        // from a previous session before bringing the tunnel up fresh.
+        kill_stale_wstunnel();
+        cleanup_stale_interface();
+
         let cfg = load_config()?;
         let name = ifname();
 
@@ -222,7 +314,8 @@ impl Daemon {
         #[cfg(target_os = "macos")]
         let mut wgapi = WGApi::<defguard_wireguard_rs::Userspace>::new(name.clone())?;
 
-        wgapi.create_interface()?;
+wgapi.create_interface()?;
+        log("up: interface created");
 
         let mut peers = Vec::new();
         for p in &cfg.peers {
@@ -260,6 +353,7 @@ impl Daemon {
         };
 
         wgapi.configure_interface(&interface_config)?;
+        log("up: interface configured");
         wgapi.configure_peer_routing(&interface_config.peers)?;
 
         if !cfg.dns.is_empty() {
@@ -269,6 +363,7 @@ impl Daemon {
                 .map(|d| d.parse())
                 .collect::<Result<Vec<_>, _>>()?;
             wgapi.configure_dns(&dns_ips, &[])?;
+            log("up: dns configured");
         }
 
         // Keep the api handle alive for the lifetime of this daemon process so
@@ -283,7 +378,12 @@ impl Daemon {
             }
             Err(e) => {
                 log(&format!("up: wstunnel failed to start: {e}"));
-                eprintln!("warning: failed to start wstunnel: {e}");
+                // Roll back so a retry brings everything up from scratch instead
+                // of leaving us in an "already up" state that never connects.
+                if let Some(mut wgapi) = self.wgapi.take() {
+                    let _ = wgapi.remove_interface();
+                }
+                return Err(e.into());
             }
         }
 
@@ -296,7 +396,8 @@ impl Daemon {
 
             let running = Arc::new(AtomicBool::new(true));
             let thread_listener = listener.try_clone()?;
-            std::thread::spawn(move || broadcast_status(thread_listener, running));
+            let api_lock = self.api_lock.clone();
+            std::thread::spawn(move || broadcast_status(api_lock, thread_listener, running));
             self.status_listener = Some(listener);
             log("up: status server started");
         }
@@ -306,6 +407,7 @@ impl Daemon {
     }
 
     fn down(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let _api_guard = self.api_lock.lock().unwrap();
         log("down: start");
 
         // Kill wstunnel by its own handle.
@@ -325,6 +427,11 @@ impl Daemon {
                 }
             }
         }
+
+        // Safety net: clear any orphaned wstunnel/adapter left by a crashed
+        // daemon that we never owned a handle to.
+        kill_stale_wstunnel();
+        cleanup_stale_interface();
 
         log("down: done");
         Ok(())
@@ -359,7 +466,7 @@ fn status_line() -> Result<String, Box<dyn std::error::Error>> {
     Ok(state)
 }
 
-fn broadcast_status(listener: TcpListener, running: Arc<AtomicBool>) {
+fn broadcast_status(api_lock: Arc<Mutex<()>>, listener: TcpListener, running: Arc<AtomicBool>) {
     let mut clients: Vec<TcpStream> = Vec::new();
     loop {
         if !running.load(Ordering::SeqCst) {
@@ -378,12 +485,15 @@ fn broadcast_status(listener: TcpListener, running: Arc<AtomicBool>) {
             }
         }
 
-        let line = match status_line() {
-            Ok(l) => l,
-            Err(e) => {
-                let msg = format!("error {e}");
-                log(&format!("up: status read failed: {e}"));
-                msg
+        let line = {
+            let _guard = api_lock.lock().unwrap();
+            match status_line() {
+                Ok(l) => l,
+                Err(e) => {
+                    let msg = format!("error {e}");
+                    log(&format!("status read failed: {e}"));
+                    msg
+                }
             }
         };
         clients.retain(|mut client| {
@@ -431,7 +541,10 @@ fn handle_conn(daemon: Arc<Mutex<Daemon>>, mut stream: TcpStream) {
             Ok(()) => "ok".to_string(),
             Err(e) => format!("error {e}"),
         },
-        "status" => status_line().unwrap_or_else(|e| format!("error {e}")),
+        "status" => {
+            let _guard = daemon.api_lock.lock().unwrap();
+            status_line().unwrap_or_else(|e| format!("error {e}"))
+        }
         other => format!("error unknown command: {other}"),
     };
 
