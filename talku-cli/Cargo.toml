@@ -9,6 +9,11 @@ build = "build.rs"
 defguard_wireguard_rs = "0.11.2"
 x25519-dalek = "3"
 log = "0.4"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "sync", "time"] }
+windows-sys = { version = "0.52", features = ["Win32_Security_Authorization", "Win32_Foundation", "Win32_Security"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-service = "0.7"
 
 [build-dependencies]
 embed-resource = "2"

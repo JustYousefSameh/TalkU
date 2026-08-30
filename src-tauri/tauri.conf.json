@@ -28,6 +28,7 @@
   "bundle": {
     "windows": {
       "nsis": {
+        "installerHooks": "./windows/hooks.nsh",
         "installerIcon": "icons/icon.ico"
       }
     },

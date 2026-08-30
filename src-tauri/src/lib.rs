@@ -1,7 +1,6 @@
 mod config;
 
-use std::fs;
-use std::sync::Mutex;
+use std::{fs, os::windows::process::CommandExt};
 
 use tauri::{
     menu::{Menu, MenuItem},
@@ -44,133 +43,286 @@ fn elevate_in_background(command: &str) {
     });
 }
 
-fn talku_cli_dir() -> Result<std::path::PathBuf, String> {
-    let helper = helper_path("talku-cli.exe")?;
-    helper
-        .parent()
-        .map(|p| p.to_path_buf())
-        .ok_or_else(|| "Helper exe has no parent directory".to_string())
+/// Start the pre-enrolled "TalkUCLI" Windows service (see
+/// `src-tauri/windows/hooks.nsh`) which runs `talku-cli` as SYSTEM with highest
+/// privileges. STARTING a service requires admin, so this runs an ELEVATED
+/// `talku-cli service-start` (which uses the `windows-service` crate to tell
+/// the SCM to start the service). The elevation shows a UAC prompt; there is no
+/// way to start a service without it unless the process is already elevated.
+/// Returns true once the elevated start has been launched (the caller then
+/// polls the named pipe until the service is reachable).
+fn start_service() -> bool {
+    elevate_in_background("service-start");
+    true
 }
 
-fn ctrl_port() -> Result<u16, String> {
-    let port_file = talku_cli_dir()?.join("talku-cli.ctrl.port");
-    std::fs::read_to_string(&port_file)
-        .map_err(|e| format!("Failed to read ctrl port file: {e}"))?
-        .trim()
-        .parse()
-        .map_err(|e| format!("Invalid ctrl port: {e}"))
-}
+/// Is the TalkUCLI service registered with the SCM? Uses the `windows-service`
+/// crate directly (no `sc` subprocess). Querying/open is permitted for the
+/// interactive (non-elevated) user, so no elevation is needed.
+fn is_service_registered() -> bool {
+    use windows_service::service::ServiceAccess;
+    use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 
-fn is_daemon_alive() -> bool {
-    use std::io::{Read, Write};
-    use std::net::TcpStream;
-    use std::time::Duration;
-
-    let port = match ctrl_port() {
-        Ok(p) => p,
+    let manager = match ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
+    {
+        Ok(m) => m,
         Err(_) => return false,
     };
-    let Ok(mut stream) = TcpStream::connect(("127.0.0.1", port)) else {
+    manager
+        .open_service(SERVICE_NAME, ServiceAccess::QUERY_STATUS)
+        .is_ok()
+}
+
+/// Is the TalkUCLI service registered AND currently running? Used to avoid
+/// needlessly re-starting an already-running service.
+fn is_service_running() -> bool {
+    use windows_service::service::ServiceAccess;
+    use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
+
+    if !is_service_registered() {
         return false;
+    }
+    let manager = match ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
+    {
+        Ok(m) => m,
+        Err(_) => return false,
     };
-    stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
-    let _ = stream.write_all(b"ping\n");
-    let mut buf = [0u8; 16];
-    stream.read(&mut buf).ok().map(|_| ()).is_some()
-}
-
-/// Make sure the elevated daemon is running. If it is not, elevate it once in
-/// the background (this is the only time a UAC prompt appears) and wait until
-/// its control socket is ready. Once the daemon stays alive, all later
-/// up/down/status commands go over loopback with no further elevation.
-fn ensure_daemon() -> Result<(), String> {
-    if is_daemon_alive() {
-        return Ok(());
-    }
-
-    // Single-flight: concurrent connect/disconnect must not both elevate and
-    // trigger a second UAC prompt. Only the first caller actually elevates;
-    // the rest simply wait for the daemon to come up.
-    static ELEVATING: Mutex<()> = Mutex::new(());
-    let _gate = ELEVATING.lock().unwrap();
-
-    // Re-check under the gate in case someone else already started it.
-    if is_daemon_alive() {
-        return Ok(());
-    }
-
-    elevate_in_background("daemon");
-
-    for _ in 0..50 {
-        if is_daemon_alive() {
-            return Ok(());
+    let service = match manager.open_service(SERVICE_NAME, ServiceAccess::QUERY_STATUS) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    match service.query_status() {
+        Ok(status) => {
+            matches!(
+                status.current_state,
+                windows_service::service::ServiceState::Running
+            )
         }
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        Err(_) => false,
     }
-
-    Err("Failed to start the elevated helper".to_string())
 }
 
-fn send_command(cmd: &str) -> Result<String, String> {
-    ensure_daemon()?;
-    send_command_impl(cmd)
+/// Named pipe the TalkUCLI service listens on (see talku-cli/src/main.rs).
+const PIPE_NAME: &str = r"\\.\pipe\TalkUCLI";
+/// Windows service name for the elevated daemon (see talku-cli/src/main.rs and
+/// src-tauri/windows/hooks.nsh).
+const SERVICE_NAME: &str = "TalkUCLI";
+
+/// Open a connection to the TalkUCLI named pipe for reading and writing. The
+/// pipe is created by the SYSTEM service with a DACL that allows the
+/// interactive user to connect, so this works from the normal (non-elevated)
+/// app.
+async fn open_pipe() -> Result<tokio::net::windows::named_pipe::NamedPipeClient, String> {
+    use tokio::net::windows::named_pipe::ClientOptions;
+    match ClientOptions::new().open(PIPE_NAME) {
+        Ok(client) => Ok(client),
+        Err(e) => {
+            println!("Failed to open named pipe {PIPE_NAME}: {e}");
+            Err(format!("Failed to open named pipe {PIPE_NAME}: {e}"))
+        }
+    }
 }
 
-/// Send a command over the ctrl socket without ensuring the daemon is running.
-/// Used for best-effort work (like disconnect-on-exit) where triggering a UAC
-/// elevation would be undesirable.
-fn send_command_impl(cmd: &str) -> Result<String, String> {
-    use std::io::{BufRead, BufReader, Write};
-    use std::net::TcpStream;
-    use std::time::Duration;
+/// Persistent named-pipe connection, opened lazily on first use and reused for
+/// every real command (websocket-style). Guarded by a tokio mutex so only one
+/// request is in flight at a time; the guard is Send-safe across awaits.
+static PIPE_CONN: std::sync::OnceLock<tokio::sync::Mutex<Option<tokio::net::windows::named_pipe::NamedPipeClient>>> =
+    std::sync::OnceLock::new();
 
-    let port = ctrl_port()?;
-    let mut stream = TcpStream::connect(("127.0.0.1", port))
-        .map_err(|e| format!("Failed to connect to helper: {e}"))?;
-    stream
-        .set_read_timeout(Some(Duration::from_secs(10)))
-        .map_err(|e| format!("Failed to set read timeout: {e}"))?;
+/// Read a single newline-terminated line directly from a named-pipe client,
+/// chunk-by-chunk, stopping at the first `\n`. Mirrors `read_pipe_command` on
+/// the daemon side and can be interleaved with writes on the same persistent
+/// connection.
+async fn read_pipe_line(
+    stream: &mut tokio::net::windows::named_pipe::NamedPipeClient,
+    timeout_ms: u64,
+) -> Result<String, String> {
+    use tokio::io::AsyncReadExt;
+    use tokio::time::{timeout, Duration};
+
+    let mut line = Vec::with_capacity(64);
+    let mut chunk = [0u8; 256];
+    loop {
+        let n = timeout(Duration::from_millis(timeout_ms), stream.read(&mut chunk))
+            .await
+            .map_err(|_| "Timed out waiting for response".to_string())?
+            .map_err(|e| format!("Failed to read response: {e}"))?;
+        if n == 0 {
+            if line.is_empty() {
+                return Err("Connection closed by daemon".to_string());
+            }
+            break;
+        }
+        if let Some(pos) = chunk[..n].iter().position(|&b| b == b'\n') {
+            line.extend_from_slice(&chunk[..pos]);
+            break;
+        }
+        line.extend_from_slice(&chunk[..n]);
+        if line.len() > 4096 {
+            break;
+        }
+    }
+    String::from_utf8(line)
+        .map(|s| s.trim().to_string())
+        .map_err(|e| format!("Invalid response encoding: {e}"))
+}
+
+/// Send one request over the named pipe and return the single-line reply. Each
+/// call opens a fresh connection, sends `cmd\n`, and reads one line back, then
+/// closes. Used only for the lightweight liveness `ping` probe.
+async fn pipe_transact(cmd: &str, timeout_ms: u64) -> Result<String, String> {
+    println!("  pipe_transact: {cmd}");
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::time::{timeout, Duration};
+
+    let stream = open_pipe().await?;
+    println!("pipe opened");
 
     let mut req = cmd.to_string();
     req.push('\n');
-    stream
-        .write_all(req.as_bytes())
-        .map_err(|e| format!("Failed to send command: {e}"))?;
 
     let mut reader = BufReader::new(stream);
-    let mut line = String::new();
     reader
-        .read_line(&mut line)
-        .map_err(|e| format!("Failed to read response: {e}"))?;
+        .get_mut()
+        .write_all(req.as_bytes())
+        .await
+        .map_err(|e| format!("Failed to send command: {e}"))?;
 
+    let mut line = String::new();
+    timeout(
+        Duration::from_millis(timeout_ms),
+        reader.read_line(&mut line),
+    )
+    .await
+    .map_err(|_| format!("Timed out waiting for response to {cmd}"))?
+    .map_err(|e| format!("Failed to read response: {e}"))?;
+
+    println!("  pipe_transact: {cmd} -> {}", line.trim().to_string());
     Ok(line.trim().to_string())
 }
 
-/// Best-effort clean disconnect used right before the app exits. Only sends
-/// `down` if a daemon is already alive (no UAC trigger), and never blocks the
-/// exit on failures — the daemon cleans up stale state on its next `up`.
-fn disconnect_before_exit() -> Result<(), String> {
-    if !is_daemon_alive() {
-        return Ok(()); // nothing to tear down
+/// Whether the TalkUCLI daemon is reachable. Opens the named pipe and expects a
+/// `pong` reply to a `ping` probe. Never starts the service or elevates.
+async fn is_daemon_alive() -> bool {
+    matches!(pipe_transact("ping", 2000).await.as_deref(), Ok("pong"))
+}
+
+/// Make sure the elevated daemon (TalkUCLI service) is running. If the service
+/// is registered but not running, start it via an ELEVATED `talku-cli
+/// service-start` (starting a service requires admin, so a UAC prompt appears).
+/// If no service is registered (dev shell), fall back to a one-time direct
+/// elevation. Either way we then poll the named pipe until the daemon answers
+/// `pong`.
+async fn ensure_daemon() -> Result<(), String> {
+    if is_daemon_alive().await {
+        return Ok(());
     }
-    match send_command_impl("down") {
-        Ok(resp) if resp.starts_with("error") => Err(resp),
-        Ok(_) => Ok(()),
-        Err(e) => Err(e),
+
+    // Single-flight: concurrent connect/disconnect must not both start the
+    // service (or elevate) at once. Only the first caller acts; the rest wait.
+    // tokio Mutex so its guard can be held across `.await` (Send-safe).
+    static STARTING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _gate = STARTING.lock().await;
+
+    // Re-check under the gate in case someone else already started it.
+    if is_daemon_alive().await {
+        return Ok(());
+    }
+
+    if is_service_registered() {
+        if !is_service_running() {
+            // Registered but stopped -> start it. Starting a service needs
+            // admin, so this goes through an elevated helper (UAC prompt).
+            start_service();
+        }
+        // If it is already running, the pipe server should come up on its own;
+        // either way we fall through to the liveness poll below.
+    } else {
+        // No preinstalled service (dev shell): fall back to a one-time direct
+        // elevation, which shows a UAC prompt. The installer registers the
+        // service so that installed builds never reach this path.
+        elevate_in_background("daemon");
+    }
+
+    for _ in 0..50 {
+        if is_daemon_alive().await {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+
+    Err("Failed to start the TalkUCLI service".to_string())
+}
+
+async fn send_command(cmd: &str) -> Result<String, String> {
+    ensure_daemon().await?;
+    send_command_impl(cmd).await
+}
+
+/// Send a command over the persistent named-pipe connection without ensuring
+/// the daemon is running. The connection is opened once on first use and reused
+/// for every subsequent command (websocket-style): we write `cmd\n` and read
+/// the single-line reply. If the connection is broken or closed, it is dropped
+/// so the next call reopens it. Used for best-effort work (like
+/// disconnect-on-exit) where starting the service would be undesirable.
+async fn send_command_impl(cmd: &str) -> Result<String, String> {
+    use tokio::io::AsyncWriteExt;
+    use tokio::time::{timeout, Duration};
+
+    let conn = PIPE_CONN.get_or_init(|| tokio::sync::Mutex::new(None));
+    let mut guard = conn.lock().await;
+
+    // Open the persistent connection lazily on first use.
+    if guard.is_none() {
+        *guard = Some(open_pipe().await?);
+    }
+
+    let stream = guard.as_mut().expect("connection just ensured");
+    let req = format!("{cmd}\n");
+
+    if let Err(e) = timeout(Duration::from_millis(10000), stream.write_all(req.as_bytes()))
+        .await
+        .map_err(|_| format!("Timed out sending command {cmd}"))?
+    {
+        // Connection is bad; drop it so the next call reopens.
+        *guard = None;
+        return Err(format!("Failed to send command: {e}"));
+    }
+
+    match read_pipe_line(stream, 10000).await {
+        Ok(line) => Ok(line),
+        Err(e) => {
+            // A failed read usually means the daemon closed the connection.
+            *guard = None;
+            Err(format!("{e} (for {cmd})"))
+        }
     }
 }
 
-fn read_status_line() -> Result<String, String> {
-    // Status reads reuse the daemon's single control socket (the "status"
-    // command is served there), so there is no need for a separate status
-    // broadcast port/file any more.
-    let line = send_command_impl("status")?;
+/// Best-effort clean disconnect used right before the app exits. Only sends
+/// `down` if a daemon is already alive (no service start), and never blocks the
+/// exit on failures — the daemon cleans up stale state on its next `up`.
+async fn disconnect_before_exit() -> Result<(), String> {
+    if !is_daemon_alive().await {
+        return Ok(()); // nothing to tear down
+    }
+    let resp = send_command_impl("down").await?;
+    if resp.starts_with("error") {
+        return Err(resp);
+    }
+    Ok(())
+}
+
+async fn read_status_line() -> Result<String, String> {
+    // Status reads reuse the daemon's single named pipe (the "status" command
+    // is served there), so there is no separate status broadcast port.
+    let line = send_command_impl("status").await?;
     println!("{}", line);
     Ok(line)
 }
 
-fn connect_vpn() -> Result<(), String> {
-    let response = send_command("up")?;
+async fn connect_vpn() -> Result<(), String> {
+    let response = send_command("up").await?;
     if response.starts_with("error") {
         return Err(response);
     }
@@ -179,16 +331,12 @@ fn connect_vpn() -> Result<(), String> {
 
 #[tauri::command]
 async fn get_vpn_status() -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(read_status_line)
-        .await
-        .map_err(|e| e.to_string())?
+    read_status_line().await
 }
 
 #[tauri::command]
 async fn disconnect_vpn() -> Result<(), String> {
-    let response = tauri::async_runtime::spawn_blocking(|| send_command("down"))
-        .await
-        .map_err(|e| e.to_string())??;
+    let response = send_command("down").await?;
     if response.starts_with("error") {
         return Err(response);
     }
@@ -204,7 +352,7 @@ async fn check_config_and_connect() -> Result<(), String> {
         .await
         .map_err(|e| e.to_string())?;
 
-    let _ = tauri::async_runtime::spawn_blocking(connect_vpn).await;
+    let _ = connect_vpn().await;
 
     Ok(())
 }
@@ -298,7 +446,7 @@ pub fn run() {
                     "exit" => {
                         // Disconnect cleanly (if connected) before exiting so the
                         // tunnel/adapter is torn down rather than left running.
-                        let _ = disconnect_before_exit();
+                        let _ = tauri::async_runtime::block_on(disconnect_before_exit());
                         app.exit(0);
                     }
                     _ => {}

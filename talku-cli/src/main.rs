@@ -1,8 +1,10 @@
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::SocketAddr;
 use std::process::ExitCode;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use windows_sys::Win32::Foundation::LocalFree;
+use windows_sys::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
 
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
@@ -386,7 +388,8 @@ impl Daemon {
         let mut peers = Vec::new();
         for p in &cfg.peers {
             let public_key = p.public_key.as_deref().ok_or("Peer missing PublicKey")?;
-            let peer_key: Key = Key::from_str(public_key).map_err(|e| format!("Bad PublicKey: {e}"))?;
+            let peer_key: Key =
+                Key::from_str(public_key).map_err(|e| format!("Bad PublicKey: {e}"))?;
             let endpoint: SocketAddr = format!("127.0.0.1:{TUNNEL_PORT}").parse().unwrap();
 
             let mut peer = Peer::new(peer_key);
@@ -431,7 +434,10 @@ impl Daemon {
         log(&format!("up: tunnel port ready in {:?}", start.elapsed()));
 
         wgapi.configure_interface(&interface_config)?;
-        log(&format!("up: interface configured in {:?}", start.elapsed()));
+        log(&format!(
+            "up: interface configured in {:?}",
+            start.elapsed()
+        ));
         wgapi.configure_peer_routing(&interface_config.peers)?;
 
         if !cfg.dns.is_empty() {
@@ -465,7 +471,10 @@ impl Daemon {
         // any lingering wstunnel by name, so detaching here keeps `down()`
         // (and thus UI disconnect -> reconnect) fast.
         let wstunnel_killed = if let Some(mut child) = self.wstunnel.take() {
-            log(&format!("down: wstunnel child killed (elapsed {:?})", start.elapsed()));
+            log(&format!(
+                "down: wstunnel child killed (elapsed {:?})",
+                start.elapsed()
+            ));
             let _ = child.kill();
             drop(child);
             true
@@ -483,7 +492,10 @@ impl Daemon {
         // would otherwise race and panic). `up()` joins this thread before
         // recreating the adapter, so create never races it either.
         let interface_removed = if let Some(wgapi) = self.wgapi.take() {
-            log(&format!("down: removing interface (elapsed {:?})", start.elapsed()));
+            log(&format!(
+                "down: removing interface (elapsed {:?})",
+                start.elapsed()
+            ));
             let lock = self.api_lock.clone();
             self.teardown = Some(std::thread::spawn(move || {
                 let _guard = lock.lock();
@@ -491,7 +503,10 @@ impl Daemon {
                 let _ = wgapi.remove_interface();
                 log("down: teardown thread done");
             }));
-            log(&format!("down: teardown dispatched (elapsed {:?})", start.elapsed()));
+            log(&format!(
+                "down: teardown dispatched (elapsed {:?})",
+                start.elapsed()
+            ));
             true
         } else {
             log("down: no interface to remove");
@@ -544,150 +559,448 @@ fn status_line() -> Result<String, Box<dyn std::error::Error>> {
     Ok(state)
 }
 
-fn ctrl_port_path() -> Result<std::path::PathBuf, String> {
-    Ok(exe_dir()?.join("talku-cli.ctrl.port"))
-}
-
-fn write_pid() -> Result<(), String> {
-    let pid = std::process::id();
-    let pid_file = exe_dir()?.join("talku-cli.pid");
-    std::fs::write(&pid_file, pid.to_string())
-        .map_err(|e| format!("Failed to write pid file: {e}"))
-}
-
-fn handle_conn(daemon: Arc<Mutex<Daemon>>, mut stream: TcpStream) {
-    use std::io::{BufRead, BufReader, Write};
-
-    stream
-        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
-        .ok();
-    let mut reader = BufReader::new(stream.try_clone().ok().unwrap());
-    let mut line = String::new();
-    if reader.read_line(&mut line).is_err() {
-        return;
-    }
-    let cmd = line.trim();
-
-    // Liveness probe: answered instantly, before taking the daemon mutex or
-    // api_lock, so the UI can detect a running daemon even mid-teardown
-    // (when the adapter close holds api_lock for ~4s).
-    if cmd == "ping" {
-        let _ = stream.write_all(b"pong\n");
-        return;
-    }
-
-    let mut daemon = match daemon.lock() {
-        Ok(g) => g,
-        Err(p) => p.into_inner(), // poisoned by an earlier panic; recover and continue
-    };
-    let response = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let _ = &mut *daemon;
-        match cmd {
-            "up" => match daemon.up() {
-                Ok(()) => "ok".to_string(),
-                Err(e) => format!("error {e}"),
-            },
-            "down" => match daemon.down() {
-                Ok(()) => "ok".to_string(),
-                Err(e) => format!("error {e}"),
-            },
-            "status" => {
-                let _guard = match daemon.api_lock.lock() {
-                    Ok(g) => g,
-                    Err(p) => p.into_inner(),
-                };
-                status_line().unwrap_or_else(|e| format!("error {e}"))
-            }
-            other => format!("error unknown command: {other}"),
-        }
-    })) {
-        Ok(resp) => resp,
-        Err(_) => "error internal".to_string(),
-    };
-
-    let mut buf = response;
-    buf.push('\n');
-    let _ = stream.write_all(buf.as_bytes());
-}
-
+/// Run `talku-cli daemon` (the dev/manual fallback when the TalkUCLI service is
+/// not registered/enrolled). It serves the exact same named-pipe protocol
+/// (`\\.\pipe\TalkUCLI` → `ping`/`up`/`down`/`status`) that the Windows service
+/// serves in-process, so the app talks to it identically whether the daemon is
+/// running as the service or as a manually-started process.
+#[cfg(windows)]
 fn run_daemon() -> ExitCode {
-    // Capture panic messages and stderr into the log file so failures in the
-    // daemon (spawned hidden/elevated) are visible instead of silently dropped.
-    let log_path = exe_dir()
-        .map(|d| d.join("talku-cli.panic.log"))
-        .unwrap_or_else(|_| std::path::PathBuf::from("talku-cli.panic.log"));
-    let hook_path = log_path.clone();
-    std::panic::set_hook(Box::new(move |info| {
-        use std::io::Write;
-        let msg = format!("PANIC: {info}\n");
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&hook_path)
-        {
-            let _ = f.write_all(msg.as_bytes());
+    let daemon = Arc::new(Mutex::new(Daemon::default()));
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("failed to build tokio runtime: {e}");
+            return ExitCode::from(1);
         }
-    }));
-    if let Ok(f) = std::fs::OpenOptions::new().create(true).append(true).open(&log_path) {
-        let _ = f; // just ensure the file is creatable
+    };
+    log("daemon: starting named-pipe server on \\\\.\\pipe\\TalkUCLI");
+    let _ = runtime.block_on(run_pipe_server(daemon));
+    ExitCode::SUCCESS
+}
+
+#[cfg(not(windows))]
+fn run_daemon() -> ExitCode {
+    eprintln!("daemon (named pipe) mode is only supported on Windows");
+    ExitCode::from(1)
+}
+
+const SERVICE_NAME: &str = "TalkUCLI";
+const PIPE_NAME: &str = r"\\.\pipe\TalkUCLI";
+/// Win32 ERROR_FAILED_SERVICE_CONTROLLER_CONNECT, returned by
+/// `service_dispatcher::start` when this process was NOT started by the
+/// Service Control Manager (i.e. it was run from a shell). We use that to fall
+/// back to the normal CLI argument mode in development / manual debugging.
+const ERROR_FAILED_SERVICE_CONTROLLER_CONNECT: i32 = 1063;
+
+// Registers the service entry point that the Service Control Manager calls.
+#[cfg(windows)]
+windows_service::define_windows_service!(ffi_service_main, service_main);
+
+/// Entry point invoked by the SCM on a dedicated thread. `arguments` is the
+/// service-specific argument vector; we spawn a tokio named-pipe server that
+/// serves `ping`/`up`/`down`/`status` over `\\.\pipe\TalkUCLI`.
+#[cfg(windows)]
+fn service_main(_arguments: Vec<std::ffi::OsString>) {
+    use windows_service::service::{
+        ServiceControl, ServiceControlAccept, ServiceExitCode, ServiceState, ServiceStatus,
+        ServiceType,
+    };
+    use windows_service::service_control_handler::{self, ServiceControlHandlerResult};
+
+    let (shutdown_tx, shutdown_rx) = std::sync::mpsc::channel::<()>();
+
+    // The SCM handler runs on a different callback thread; it signals shutdown
+    // through the channel and we (the service thread) block on the receiving end.
+    let event_handler = move |control_event: ServiceControl| -> ServiceControlHandlerResult {
+        match control_event {
+            ServiceControl::Stop | ServiceControl::Shutdown => {
+                let _ = shutdown_tx.send(());
+                ServiceControlHandlerResult::NoError
+            }
+            ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
+            _ => ServiceControlHandlerResult::NotImplemented,
+        }
+    };
+
+    let status_handle = match service_control_handler::register(SERVICE_NAME, event_handler) {
+        Ok(h) => h,
+        Err(e) => {
+            log(&format!("service: register handler failed: {e}"));
+            return;
+        }
+    };
+
+    // Tell the SCM we are running and accept Stop/Shutdown requests.
+    if let Err(e) = status_handle.set_service_status(ServiceStatus {
+        service_type: ServiceType::OWN_PROCESS,
+        current_state: ServiceState::Running,
+        controls_accepted: ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN,
+        exit_code: ServiceExitCode::Win32(0),
+        checkpoint: 0,
+        wait_hint: std::time::Duration::default(),
+        process_id: None,
+    }) {
+        log(&format!("service: set running status failed: {e}"));
+        return;
     }
 
     let daemon = Arc::new(Mutex::new(Daemon::default()));
+    let daemon_for_pipe = daemon.clone();
 
-    let listener = match TcpListener::bind("127.0.0.1:0") {
-        Ok(l) => l,
+    // Host the tokio named-pipe server on a background thread. We keep the
+    // service thread blocked here so the service stays alive until stopped.
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(r) => r,
         Err(e) => {
-            eprintln!("failed to bind ctrl listener: {e}");
-            return ExitCode::from(1);
+            log(&format!("service: tokio runtime failed: {e}"));
+            let _ = status_handle.set_service_status(service_stopped_status());
+            return;
         }
     };
-    let port = match listener.local_addr() {
-        Ok(a) => a.port(),
-        Err(e) => {
-            eprintln!("failed to get ctrl port: {e}");
-            return ExitCode::from(1);
-        }
+
+    let _runtime_thread = {
+        let runtime = runtime;
+        std::thread::spawn(move || {
+            let _ = runtime.block_on(run_pipe_server(daemon_for_pipe));
+        })
     };
 
-    if let Ok(path) = ctrl_port_path() {
-        let _ = std::fs::write(&path, port.to_string());
+    log("service: running (waiting for pipe clients)");
+
+    // Block until the SCM tells us to stop.
+    let _ = shutdown_rx.recv();
+    log("service: stop requested");
+
+    if let Err(e) = status_handle.set_service_status(service_stopped_status()) {
+        log(&format!("service: set stopped status failed: {e}"));
     }
-    let _ = write_pid();
+}
 
-    log(&format!("daemon: listening on 127.0.0.1:{port}"));
-    println!("daemon ready on 127.0.0.1:{port}");
+#[cfg(windows)]
+fn service_stopped_status() -> windows_service::service::ServiceStatus {
+    use windows_service::service::{ServiceExitCode, ServiceState, ServiceStatus, ServiceType};
+    ServiceStatus {
+        service_type: ServiceType::OWN_PROCESS,
+        current_state: ServiceState::Stopped,
+        controls_accepted: windows_service::service::ServiceControlAccept::STOP,
+        exit_code: ServiceExitCode::Win32(0),
+        checkpoint: 0,
+        wait_hint: std::time::Duration::default(),
+        process_id: None,
+    }
+}
 
-    for stream in listener.incoming() {
-        match stream {
-            Ok(stream) => {
-                let daemon = daemon.clone();
-                std::thread::spawn(move || handle_conn(daemon, stream));
+/// Runs the tokio named-pipe server for the life of the service/daemon. Accepts
+/// clients one at a time but never stops: after each connection is fully
+/// served, a fresh server instance is created so the pipe stays open and future
+/// clients keep working. Also logs a heartbeat every 2s proving the daemon is
+/// still alive and the pipe is still listening.
+#[cfg(windows)]
+async fn run_pipe_server(daemon: Arc<Mutex<Daemon>>) {
+    use std::ffi::c_void;
+    use std::ptr;
+
+    use tokio::net::windows::named_pipe::ServerOptions;
+    use tokio::time;
+
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+    };
+    use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+
+    // Heartbeat
+    let mut interval = time::interval(time::Duration::from_secs(2));
+    tokio::spawn(async move {
+        loop {
+            interval.tick().await;
+            log("service: alive (pipe listening)");
+        }
+    });
+
+    let sddl = "D:(A;;GA;;;WD)\0";
+    let wide_sddl: Vec<u16> = sddl.encode_utf16().collect();
+    let mut sd_ptr = ptr::null_mut();
+
+    let success = unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            wide_sddl.as_ptr(),
+            SDDL_REVISION_1,
+            &mut sd_ptr,
+            ptr::null_mut(),
+        )
+    };
+
+    if success == 0 {
+        log(&format!(
+            "service: SDDL conversion failed: {}",
+            std::io::Error::last_os_error()
+        ));
+        return;
+    }
+
+    // 2. WRAP the Security Descriptor in a SECURITY_ATTRIBUTES struct
+    let mut sa = SECURITY_ATTRIBUTES {
+        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: sd_ptr,
+        bInheritHandle: 0,
+    };
+
+    // Create the initial pipe instance
+    let mut server = match unsafe {
+        ServerOptions::new()
+            .first_pipe_instance(true)
+            .create_with_security_attributes_raw(PIPE_NAME, &mut sa as *mut _ as *mut c_void)
+    } {
+        Ok(s) => s,
+        Err(e) => {
+            log(&format!("service: failed to create initial pipe: {e}"));
+            unsafe {
+                LocalFree(sd_ptr as _);
             }
-            Err(e) => log(&format!("daemon: accept error: {e}")),
+            return;
+        }
+    };
+
+    log("service: pipe server listening");
+
+    loop {
+        if let Err(e) = server.connect().await {
+            log(&format!("service: pipe connect failed: {e}"));
+            break;
+        }
+
+        let daemon = daemon.clone();
+        tokio::spawn(handle_pipe_conn(daemon, server));
+
+        // 3. APPLY the custom security attributes directly inline (No closure needed!)
+        match unsafe {
+            ServerOptions::new()
+                .create_with_security_attributes_raw(PIPE_NAME, &mut sa as *mut _ as *mut c_void)
+        } {
+            Ok(next) => server = next,
+            Err(e) => {
+                log(&format!(
+                    "service: failed to create next pipe instance: {e}"
+                ));
+                break;
+            }
         }
     }
 
-    ExitCode::SUCCESS
+    // Clean up the security descriptor if the loop ever breaks
+    unsafe {
+        LocalFree(sd_ptr as _);
+    }
+}
+
+/// Serves a single persistent named-pipe connection: loops reading
+/// newline-terminated commands, dispatching each against the shared `Daemon`,
+/// and writing back a newline-terminated reply for each, until the client
+/// disconnects. Protocol: `ping` -> `pong`, else `up`/`down`/`status` ->
+/// `ok`/`error ...`. This keeps the connection open (websocket-style) so one
+/// client can issue many commands without reconnecting.
+#[cfg(windows)]
+async fn handle_pipe_conn(
+    daemon: Arc<Mutex<Daemon>>,
+    mut stream: tokio::net::windows::named_pipe::NamedPipeServer,
+) {
+    use tokio::io::AsyncWriteExt;
+
+    loop {
+        let Some(cmd) = read_pipe_command(&mut stream).await else {
+            break; // client disconnected or error
+        };
+        if cmd.is_empty() {
+            continue;
+        }
+        log(&format!("command received: {cmd}"));
+
+        // Liveness probe: answered instantly, before taking the daemon mutex or
+        // api_lock, so the app can detect a running daemon even mid-teardown.
+        if cmd == "ping" {
+            if let Err(e) = stream.write_all(b"pong\n").await {
+                log(&format!("service: write failed on ping: {e}"));
+                break;
+            }
+            continue;
+        }
+
+        let response = {
+            let mut daemon = match daemon.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            let cmd_ref = cmd.as_str();
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match cmd_ref {
+                "up" => match daemon.up() {
+                    Ok(()) => "ok".to_string(),
+                    Err(e) => format!("error {e}"),
+                },
+                "down" => match daemon.down() {
+                    Ok(()) => "ok".to_string(),
+                    Err(e) => format!("error {e}"),
+                },
+                "status" => {
+                    let _guard = match daemon.api_lock.lock() {
+                        Ok(g) => g,
+                        Err(p) => p.into_inner(),
+                    };
+                    status_line().unwrap_or_else(|e| format!("error {e}"))
+                }
+                other => format!("error unknown command: {other}"),
+            })) {
+                Ok(resp) => resp,
+                Err(_) => "error internal".to_string(),
+            }
+        };
+
+        let mut buf = response;
+        buf.push('\n');
+        if let Err(e) = stream.write_all(buf.as_bytes()).await {
+            log(&format!("service: write failed: {e}"));
+            break;
+        }
+    }
+    log("service: client disconnected");
+}
+
+/// Read a single newline-terminated command directly from the pipe stream,
+/// chunk-by-chunk, stopping at the first `\n`. Returns `None` if the client
+/// disconnects or a read error occurs. Reading straight from `stream` (rather
+/// than through a BufReader that would borrow it) lets the caller freely
+/// interleave reads and writes on the same persistent connection.
+#[cfg(windows)]
+async fn read_pipe_command(
+    stream: &mut tokio::net::windows::named_pipe::NamedPipeServer,
+) -> Option<String> {
+    use tokio::io::AsyncReadExt;
+
+    let mut line = Vec::with_capacity(64);
+    let mut chunk = [0u8; 256];
+    loop {
+        let n = match stream.read(&mut chunk).await {
+            Ok(0) => {
+                if line.is_empty() {
+                    return None;
+                }
+                break;
+            }
+            Ok(n) => n,
+            Err(_) => return None,
+        };
+        if let Some(pos) = chunk[..n].iter().position(|&b| b == b'\n') {
+            line.extend_from_slice(&chunk[..pos]);
+            break;
+        }
+        line.extend_from_slice(&chunk[..n]);
+        if line.len() > 4096 {
+            break;
+        }
+    }
+    String::from_utf8(line).ok().map(|s| s.trim().to_string())
 }
 
 fn main() -> ExitCode {
     // Resolve all runtime files (WireGuard DLL, config, wstunnel, pid/port
     // files) relative to this exe regardless of how it is launched. This
-    // process may be started by elevated-command, a scheduled task, or the
-    // installer, all of which set the CWD to something unrelated, so we pin the
-    // working directory to the directory containing this executable.
+    // process may be started by the Service Control Manager, a scheduled task,
+    // or the installer, all of which set the CWD to something unrelated, so we
+    // pin the working directory to the directory containing this executable.
     if let Ok(dir) = exe_dir() {
         let _ = std::env::set_current_dir(&dir);
     }
 
+    // On Windows, first try to let the Service Control Manager drive this
+    // process as the TalkUCLI service. If we were not launched by the SCM,
+    // `start` returns ERROR_FAILED_SERVICE_CONTROLLER_CONNECT quickly and we
+    // fall through to the normal CLI argument handling (dev/debug mode).
+    #[cfg(windows)]
+    {
+        use windows_service::Error;
+        match windows_service::service_dispatcher::start(SERVICE_NAME, ffi_service_main) {
+            // Not launched by the SCM (running interactively) -> fall through
+            // to the normal CLI argument handling.
+            Err(Error::Winapi(e))
+                if e.raw_os_error() == Some(ERROR_FAILED_SERVICE_CONTROLLER_CONNECT) => {}
+            Ok(()) => return ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("service_dispatcher::start error: {e}");
+                return ExitCode::from(1);
+            }
+        }
+    }
+
+    cli_main()
+}
+
+#[cfg(not(windows))]
+fn main() -> ExitCode {
+    if let Ok(dir) = exe_dir() {
+        let _ = std::env::set_current_dir(&dir);
+    }
+    cli_main()
+}
+
+/// Start the TalkUCLI service via the SCM using the `windows-service` crate.
+/// Starting a service requires admin, so the app drives this through an
+/// ELEVATED `talku-cli service-start` invocation (see `start_service` in
+/// src-tauri/src/lib.rs) rather than calling it from the non-elevated app.
+#[cfg(windows)]
+fn cli_service_start() -> ExitCode {
+    use windows_service::service::ServiceAccess;
+    use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
+
+    let manager = match ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
+    {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("service-start: open SCM failed: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let service = match manager.open_service(SERVICE_NAME, ServiceAccess::START) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("service-start: open service failed: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    match service.start(&[] as &[&std::ffi::OsStr]) {
+        Ok(()) => {
+            println!("service-start: started {SERVICE_NAME}");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("service-start: start failed: {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn cli_service_start() -> ExitCode {
+    eprintln!("service-start is only supported on Windows");
+    ExitCode::from(1)
+}
+
+fn cli_main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
-        eprintln!("usage: talku-cli <daemon|up|down|status> [config-path]");
+        eprintln!("usage: talku-cli <daemon|service-start|up|down|status> [config-path]");
         return ExitCode::from(1);
     }
 
     match args[1].as_str() {
         "daemon" => run_daemon(),
+        "service-start" => cli_service_start(),
         "up" => {
             let mut d = Daemon::default();
             match d.up() {
