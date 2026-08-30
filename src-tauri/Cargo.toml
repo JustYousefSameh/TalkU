@@ -29,6 +29,7 @@ tauri-plugin-log = "2"
 tauri-plugin-single-instance = "2"
 elevated-command = "1"
 defguard_wireguard_rs = "0.11.2"
+sysinfo = "0.30"
 
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.7"

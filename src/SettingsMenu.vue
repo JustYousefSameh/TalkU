@@ -1,9 +1,13 @@
 <script setup lang="ts">
 import { ref } from "vue";
-import { Settings, Gamepad2, Plus, Check, X, Trash2 } from "lucide-vue-next";
+import { Settings, Gamepad2, Plus, Check, X, Trash2, Monitor } from "lucide-vue-next";
 
 defineProps<{
     open: boolean;
+}>();
+
+defineEmits<{
+    "open-monitor": [];
 }>();
 
 const games = ref<string[]>([]);
@@ -72,6 +76,17 @@ function removeGame(game: string) {
                     <span class="toggle-pill"
                         ><span class="toggle-pill-dot"></span
                     ></span>
+                </button>
+
+                <div class="menu-group-title">Monitoring</div>
+                <button
+                    class="menu-btn-monitor"
+                    type="button"
+                    title="Open monitor"
+                    @click="$emit('open-monitor')"
+                >
+                    <Monitor class="h-4" />
+                    <span>Monitor</span>
                 </button>
 
                 <div class="menu-group-title">Monitored games</div>
@@ -293,6 +308,31 @@ function removeGame(game: string) {
     background: rgba(255, 255, 255, 0.02);
     scrollbar-width: thin;
     scrollbar-color: rgba(35, 164, 70, 0.5) transparent;
+}
+
+.menu-btn-monitor {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 7px;
+    width: calc(100% - 12px);
+    margin: 2px 6px 8px;
+    padding: 9px 12px;
+    border: 1px solid rgba(35, 164, 70, 0.4);
+    border-radius: 8px;
+    background: rgba(35, 164, 70, 0.1);
+    color: #23a446;
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    transition:
+        background-color 0.14s ease,
+        border-color 0.14s ease;
+}
+
+.menu-btn-monitor:hover {
+    background: rgba(35, 164, 70, 0.18);
+    border-color: rgba(35, 164, 70, 0.6);
 }
 
 .games-box::-webkit-scrollbar {

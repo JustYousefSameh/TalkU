@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
-import { info, warn, error } from "@tauri-apps/plugin-log";
+import { info } from "@tauri-apps/plugin-log";
 import { Mic, MicOff, Loader } from "lucide-vue-next";
 import type { Status } from "./types";
 

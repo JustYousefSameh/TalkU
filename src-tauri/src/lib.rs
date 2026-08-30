@@ -357,6 +357,118 @@ async fn check_config_and_connect() -> Result<(), String> {
     Ok(())
 }
 
+#[derive(serde::Serialize)]
+struct ProcessInfo {
+    pid: u32,
+    name: String,
+    count: u32,
+    cpu_percent: f32,
+    memory_kb: u64,
+}
+
+/// Windows system/session-0 processes that must never show up in the Monitor
+/// list, even the ones (like `csrss.exe`, `dwm.exe`) that also run in the
+/// interactive session. Everything else running in session 0 is filtered out by
+/// session id.
+const SYSTEM_PROCESS_NAMES: &[&str] = &[
+    "system",
+    "system idle process",
+    "registry",
+    "smss.exe",
+    "csrss.exe",
+    "wininit.exe",
+    "winlogon.exe",
+    "services.exe",
+    "lsass.exe",
+    "svchost.exe",
+    "lsm.exe",
+    "fontdrvhost.exe",
+    "dwm.exe",
+    "conhost.exe",
+    "sihost.exe",
+    "dllhost.exe",
+    "taskhostw.exe",
+    "spoolsv.exe",
+    "audiodg.exe",
+];
+
+/// List the processes currently visible to the app, sorted by name, for the
+/// Monitor menu. Two rules keep the list useful:
+///
+/// 1. System processes are hidden — anything in session 0, the kernel/system
+///    idle pseudo-processes, and known system executables by name.
+/// 2. Only the *root* of each process tree is shown: a process with no
+///    surviving parent, whose parent is a system process, or whose parent is
+///    Explorer (the desktop shell launching user apps) counts as a root.
+///    Everything spawned by another user process is hidden.
+#[tauri::command]
+fn list_processes() -> Result<Vec<ProcessInfo>, String> {
+    use std::collections::HashMap;
+    use sysinfo::System;
+
+    let system = System::new_all();
+
+    let is_system: HashMap<sysinfo::Pid, bool> = system
+        .processes()
+        .iter()
+        .map(|(pid, p)| {
+            let sys = pid.as_u32() <= 4
+                || p.session_id().map_or(false, |s| s.as_u32() == 0)
+                || SYSTEM_PROCESS_NAMES.iter().any(|n| p.name().eq_ignore_ascii_case(n));
+            (*pid, sys)
+        })
+        .collect();
+
+    // Collapse multiple instances of the same executable into a single row and
+    // keep the lowest PID (plus the instance count).
+    let mut by_name: HashMap<String, (u32, u32, f32, u64)> = HashMap::new();
+    for (pid, p) in system.processes() {
+        if is_system.get(pid).copied().unwrap_or(true) {
+            continue;
+        }
+
+        let is_root = match p.parent() {
+            None => true, // orphaned / reparented to system -> treat as root
+            Some(pp) => {
+                if pp == *pid {
+                    true
+                } else if let Some(parent_proc) = system.processes().get(&pp) {
+                    // An app launched from Explorer is the root of its own tree.
+                    parent_proc.name().eq_ignore_ascii_case("explorer.exe")
+                        || is_system.get(&pp).copied().unwrap_or(true)
+                } else {
+                    true // parent already gone -> root
+                }
+            }
+        };
+        if !is_root {
+            continue;
+        }
+
+        let name = p.name().to_string();
+        let entry = by_name
+            .entry(name)
+            .or_insert((pid.as_u32(), 0, p.cpu_usage(), p.memory() / 1024));
+        if pid.as_u32() < entry.0 {
+            entry.0 = pid.as_u32();
+        }
+        entry.1 += 1;
+    }
+
+    let mut list: Vec<ProcessInfo> = by_name
+        .into_iter()
+        .map(|(name, (pid, count, cpu_percent, memory_kb))| ProcessInfo {
+            pid,
+            name,
+            count,
+            cpu_percent,
+            memory_kb,
+        })
+        .collect();
+    list.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    Ok(list)
+}
+
 const API_URL: &str = "https://talku.ddns.net:8000/";
 #[derive(serde::Deserialize)]
 struct ConnectedUsersResponse {
@@ -399,7 +511,8 @@ pub fn run() {
             get_connected_users_count,
             get_vpn_status,
             check_config_and_connect,
-            disconnect_vpn
+            disconnect_vpn,
+            list_processes
         ])
         .setup(|app| {
             if cfg!(target_os = "linux") {

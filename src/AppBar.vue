@@ -4,8 +4,10 @@ import { Settings, Minus, X } from "lucide-vue-next";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { info } from "@tauri-apps/plugin-log";
 import SettingsMenu from "./SettingsMenu.vue";
+import MonitorMenu from "./MonitorMenu.vue";
 
 const settingsOpen = ref(false);
+const monitorOpen = ref(false);
 const appbarRef = ref<HTMLDivElement | null>(null);
 
 // Minimize to tray when the close button is pressed
@@ -19,12 +21,19 @@ async function minimizeWindow() {
 }
 
 function toggleSettings() {
+    monitorOpen.value = false;
     settingsOpen.value = !settingsOpen.value;
+}
+
+function openMonitor() {
+    settingsOpen.value = false;
+    monitorOpen.value = true;
 }
 
 function onDocumentClick(e: MouseEvent) {
     if (appbarRef.value && !appbarRef.value.contains(e.target as Node)) {
         settingsOpen.value = false;
+        monitorOpen.value = false;
     }
 }
 
@@ -69,7 +78,8 @@ onUnmounted(() => {
             </div>
         </div>
 
-        <SettingsMenu :open="settingsOpen" />
+        <SettingsMenu :open="settingsOpen" @open-monitor="openMonitor" />
+        <MonitorMenu :open="monitorOpen" @close="monitorOpen = false" />
     </main>
 </template>
 

@@ -559,6 +559,138 @@ fn status_line() -> Result<String, Box<dyn std::error::Error>> {
     Ok(state)
 }
 
+/// Given a target process name (e.g. `GTA5.exe`), listen over the target for
+/// `duration_secs` seconds and collect every remote `ip:port` the process is
+/// stuck trying to reach — TCP sockets in `SYN_SENT`. Sampling every ~500ms
+/// catches endpoints that only stay in SYN_SENT briefly, so endpoints that
+/// *become* unreachable at any point inside the window are all reported, not
+/// just whatever was stuck at t=0. `duration_secs == 0` means a single instant
+/// snapshot.
+///
+/// Process name → PID mapping is done with `sysinfo` (case-insensitive, accepts
+/// the name with or without the `.exe` suffix) and re-resolved every sample, so
+/// a process that starts mid-window is still followed. Socket enumeration is
+/// done with `netstat2`, filtered by the resolved PIDs. Returns the union
+/// (deduplicated) of all `ip:port` targets seen in SYN_SENT during the window.
+fn unreachable_ips(process_name: &str, duration_secs: u64) -> Result<Vec<String>, String> {
+    use netstat2::*;
+    use std::time::{Duration, Instant};
+    use sysinfo::System;
+
+    let requested = process_name.trim().to_lowercase();
+    let requested_plain = requested.strip_suffix(".exe").unwrap_or(&requested).to_string();
+
+    // 1. Map process name -> PIDs. If nothing matches yet (e.g. the process
+    //    hasn't started, or the name is slightly wrong) we DON'T bail: the loop
+    //    below keeps re-resolving PIDs for the whole window, so a process that
+    //    launches mid-window is still picked up.
+    let mut system = System::new();
+    system.refresh_processes();
+    let mut pids: Vec<u32> = system
+        .processes()
+        .iter()
+        .filter_map(|(pid, process)| {
+            let name = process.name().to_lowercase();
+            let name_plain = name.strip_suffix(".exe").unwrap_or(&name);
+            if name == requested || name_plain == requested_plain {
+                Some(pid.as_u32())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // 2. Watch the socket table across the window, accumulating the union of
+    //    SYN_SENT targets owned by the process.
+    let sample_interval = Duration::from_millis(500);
+    let deadline = Instant::now() + Duration::from_secs(duration_secs);
+    let mut ips: Vec<String> = Vec::new();
+
+    loop {
+        let sockets = get_sockets_info(
+            AddressFamilyFlags::IPV4 | AddressFamilyFlags::IPV6,
+            ProtocolFlags::TCP,
+        )
+        .map_err(|e| format!("netstat failed: {e}"))?;
+
+        for si in &sockets {
+            let owned = si.associated_pids.iter().any(|p| pids.contains(p));
+            if !owned {
+                continue;
+            }
+            if let ProtocolSocketInfo::Tcp(tcp) = &si.protocol_socket_info {
+                if tcp.state == TcpState::SynSent {
+                    let remote = format!("{}:{}", tcp.remote_addr, tcp.remote_port);
+                    if !ips.contains(&remote) {
+                        ips.push(remote);
+                    }
+                }
+            }
+        }
+
+        if Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(sample_interval);
+
+        // Refresh the PID map so a process that starts (or restarts) during the
+        // window is followed.
+        system.refresh_processes();
+        pids = system
+            .processes()
+            .iter()
+            .filter_map(|(pid, process)| {
+                let name = process.name().to_lowercase();
+                let name_plain = name.strip_suffix(".exe").unwrap_or(&name);
+                if name == requested || name_plain == requested_plain {
+                    Some(pid.as_u32())
+                } else {
+                    None
+                }
+            })
+            .collect();
+    }
+    Ok(ips)
+}
+
+/// Replace characters that Windows forbids in file names so a process name or
+/// `ip:port` pair can safely appear in the report file name.
+fn sanitize_file_name(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if matches!(
+                c,
+                '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | '\n' | '\r'
+            ) {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
+/// Save a capture to `<process-name>_<ip:port>_<ip:port>...txt` next to the
+/// executable (one endpoint per line). Returns the full path written.
+fn write_unreachable_report(
+    process_name: &str,
+    ips: &[String],
+) -> Result<std::path::PathBuf, String> {
+    let mut base = sanitize_file_name(process_name.trim());
+    if !ips.is_empty() {
+        base.push('_');
+        base.push_str(&sanitize_file_name(&ips.join("_")));
+    }
+    let path = exe_dir()?.join(format!("{base}.txt"));
+    let mut content = String::new();
+    for ip in ips {
+        content.push_str(ip);
+        content.push('\n');
+    }
+    std::fs::write(&path, content).map_err(|e| format!("failed to write report: {e}"))?;
+    Ok(path)
+}
+
 /// Run `talku-cli daemon` (the dev/manual fallback when the TalkUCLI service is
 /// not registered/enrolled). It serves the exact same named-pipe protocol
 /// (`\\.\pipe\TalkUCLI` → `ping`/`up`/`down`/`status`) that the Windows service
@@ -833,6 +965,42 @@ async fn handle_pipe_conn(
             continue;
         }
 
+        // `unreachable <process-name> [seconds]`: listen over the given process
+        // for `seconds` (default 30) and report the remote endpoints it is
+        // stuck trying to connect to (SYN_SENT). Doesn't touch the daemon, so
+        // handle it outside the daemon lock; `sysinfo`/`netstat2` are
+        // blocking, so run them on a blocking thread.
+        if let Some(rest) = cmd.strip_prefix("unreachable") {
+            let mut parts = rest.split_whitespace();
+            let name = parts.next().unwrap_or("").to_string();
+            let secs = parts
+                .next()
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(30);
+            let response = if name.is_empty() {
+                "error missing process name".to_string()
+            } else {
+                match tokio::task::spawn_blocking(move || unreachable_ips(&name, secs)).await {
+                    Ok(Ok(ips)) => {
+                        if ips.is_empty() {
+                            "none".to_string()
+                        } else {
+                            ips.join(",")
+                        }
+                    }
+                    Ok(Err(e)) => format!("error {e}"),
+                    Err(e) => format!("error {e}"),
+                }
+            };
+            let mut buf = response;
+            buf.push('\n');
+            if let Err(e) = stream.write_all(buf.as_bytes()).await {
+                log(&format!("service: unreachable write failed: {e}"));
+                break;
+            }
+            continue;
+        }
+
         let response = {
             let mut daemon = match daemon.lock() {
                 Ok(g) => g,
@@ -994,7 +1162,7 @@ fn cli_service_start() -> ExitCode {
 fn cli_main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
-        eprintln!("usage: talku-cli <daemon|service-start|up|down|status> [config-path]");
+        eprintln!("usage: talku-cli <daemon|service-start|up|down|status|unreachable> [config-path|process-name]");
         return ExitCode::from(1);
     }
 
@@ -1034,6 +1202,37 @@ fn cli_main() -> ExitCode {
                 ExitCode::from(1)
             }
         },
+        "unreachable" => {
+            let name = args.get(2).cloned().unwrap_or_default();
+            if name.is_empty() {
+                eprintln!("usage: talku-cli unreachable <process-name> [seconds]");
+                return ExitCode::from(1);
+            }
+            let secs = args
+                .get(3)
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(30);
+            if secs > 0 {
+                eprintln!("monitoring '{name}' for {secs}s ...");
+            }
+            match unreachable_ips(&name, secs).and_then(|ips| {
+                let path = write_unreachable_report(&name, &ips)?;
+                Ok((ips, path))
+            }) {
+                Ok((ips, path)) => {
+                    eprintln!(
+                        "saved {} endpoint(s) to {}",
+                        ips.len(),
+                        path.display()
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    ExitCode::from(1)
+                }
+            }
+        }
         other => {
             eprintln!("unknown command: {other}");
             ExitCode::from(1)
