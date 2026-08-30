@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { ref, onMounted } from "vue";
+import { ref, onMounted, onUnmounted } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 
 const connectedUsers = ref<number>(0);
+let interval: number | undefined;
 
-onMounted(async () => {
+async function refresh() {
     try {
         connectedUsers.value = await invoke<number>(
             "get_connected_users_count",
@@ -12,6 +13,15 @@ onMounted(async () => {
     } catch (err) {
         console.error(err);
     }
+}
+
+onMounted(() => {
+    refresh();
+    interval = window.setInterval(refresh, 120000);
+});
+
+onUnmounted(() => {
+    if (interval !== undefined) window.clearInterval(interval);
 });
 </script>
 

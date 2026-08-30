@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { ref, watch } from "vue";
 import AppBar from "./AppBar.vue";
 import CustomSliderButton from "./CustomSliderButton.vue";
 import SocialLink from "./SocialLink.vue";
@@ -7,6 +7,8 @@ import ActiveUsers from "./ActiveUsers.vue";
 import GradientBackgroundWithImage from "./GradientBackgroundWithImage.vue";
 import ConnectionTimer from "./ConnectionTimer.vue";
 import ErrorBox from "./ErrorBox.vue";
+import connectSound from "./assets/connect.mp3";
+import disconnectSound from "./assets/disconnect.mp3";
 import type { Status } from "./types";
 
 const status = ref<Status>("disconnected");
@@ -17,6 +19,25 @@ function onRetry() {
     errorMessage.value = null;
     sliderRef.value?.retryLastAction();
 }
+
+let audio: HTMLAudioElement | null = null;
+
+function playSound(src: string) {
+    try {
+        if (audio) {
+            audio.pause();
+            audio.currentTime = 0;
+        }
+        audio = new Audio(src);
+        audio.play().catch(() => {});
+    } catch {}
+}
+
+watch(status, (next, prev) => {
+    if (prev === next) return;
+    if (next === "connected") playSound(connectSound);
+    else if (next === "disconnected") playSound(disconnectSound);
+});
 </script>
 
 <template>
