@@ -10,7 +10,10 @@ fn copy_wireguard_dll() {
         .join("binaries")
         .join("wireguard-amd64.dll");
     if !source.exists() {
-        println!("cargo:warning=wireguard-amd64.dll not present at {:?}; skipping copy", source);
+        println!(
+            "cargo:warning=wireguard-amd64.dll not present at {:?}; skipping copy",
+            source
+        );
         return;
     }
 
@@ -40,8 +43,8 @@ fn copy_wireguard_dll() {
 }
 
 fn main() {
-    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
-        copy_wireguard_dll();
-    }
+    // if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+    //     copy_wireguard_dll();
+    // }
     tauri_build::build()
 }

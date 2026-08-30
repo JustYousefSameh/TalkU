@@ -671,6 +671,15 @@ fn run_daemon() -> ExitCode {
 }
 
 fn main() -> ExitCode {
+    // Resolve all runtime files (WireGuard DLL, config, wstunnel, pid/port
+    // files) relative to this exe regardless of how it is launched. This
+    // process may be started by elevated-command, a scheduled task, or the
+    // installer, all of which set the CWD to something unrelated, so we pin the
+    // working directory to the directory containing this executable.
+    if let Ok(dir) = exe_dir() {
+        let _ = std::env::set_current_dir(&dir);
+    }
+
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
         eprintln!("usage: talku-cli <daemon|up|down|status> [config-path]");

@@ -26,12 +26,17 @@
     }
   },
   "bundle": {
+    "windows": {
+      "nsis": {
+        "installerIcon": "icons/icon.ico"
+      }
+    },
+    "resources": {
+      "assets/wireguard-amd64.dll": "resources-windows/binaries/wireguard-amd64.dll"
+    },
     "active": true,
     "targets": "all",
-    "externalBin": [
-      "binaries/talku-cli",
-      "binaries/wstunnel"
-    ],
+    "externalBin": ["binaries/talku-cli", "binaries/wstunnel"],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
