@@ -261,7 +261,7 @@ watch(
     width: 100%;
     height: 100%;
     display: block;
-    border-radius: 20px;
+    border-radius: 16px;
     overflow: hidden;
 }
 

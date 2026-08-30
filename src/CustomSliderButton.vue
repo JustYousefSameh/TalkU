@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { info, warn, error } from "@tauri-apps/plugin-log";
 import { Mic, MicOff, Loader } from "lucide-vue-next";
 import type { Status } from "./types";
 
@@ -114,14 +115,17 @@ defineExpose({ retryLastAction });
 
 async function pollUntilConnected(): Promise<Status> {
     const deadline = Date.now() + 30000;
+    const startTime = Date.now();
     while (Date.now() < deadline) {
         try {
             const line = await invoke<string>("get_vpn_status");
+            const timeTaken = Date.now() - startTime;
+            info(`pollUntilConnected: timeTaken=${timeTaken / 1000}`);
             if (line.startsWith("connected")) return "connected";
         } catch {
             // Status server not reachable yet; keep polling.
         }
-        await new Promise((r) => setTimeout(r, 1000));
+        await new Promise((r) => setTimeout(r, 100));
     }
     throw new Error("Failed to connect.");
 }
