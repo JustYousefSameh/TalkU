@@ -16,12 +16,19 @@ const addingGame = ref(false);
 const newGame = ref("");
 const inputRef = ref<HTMLInputElement | null>(null);
 const launchOnStartup = ref(false);
+const autoConnect = ref(false);
 
 onMounted(async () => {
     try {
         launchOnStartup.value = await invoke<boolean>("get_launch_on_startup");
     } catch (err) {
         console.error("Failed to load autostart setting:", err);
+    }
+    try {
+        autoConnect.value = await invoke<boolean>("get_auto_connect");
+        games.value = await invoke<string[]>("get_monitored_games");
+    } catch (err) {
+        console.error("Failed to load game settings:", err);
     }
 });
 
@@ -35,16 +42,31 @@ async function toggleLaunchOnStartup() {
     }
 }
 
+async function toggleAutoConnect() {
+    const next = !autoConnect.value;
+    try {
+        await invoke("set_auto_connect", { enabled: next });
+        autoConnect.value = next;
+    } catch (err) {
+        console.error("Failed to update auto-connect setting:", err);
+    }
+}
+
 function showAdd() {
     addingGame.value = true;
     newGame.value = "";
     requestAnimationFrame(() => inputRef.value?.focus());
 }
 
-function confirmAdd() {
+async function confirmAdd() {
     const game = newGame.value.trim();
     if (game && !games.value.includes(game)) {
-        games.value.push(game);
+        try {
+            await invoke("add_monitored_game", { name: game });
+            games.value.push(game);
+        } catch (err) {
+            console.error("Failed to add game:", err);
+        }
     }
     addingGame.value = false;
     newGame.value = "";
@@ -55,8 +77,13 @@ function cancelAdd() {
     newGame.value = "";
 }
 
-function removeGame(game: string) {
-    games.value = games.value.filter((g) => g !== game);
+async function removeGame(game: string) {
+    try {
+        await invoke("remove_monitored_game", { name: game });
+        games.value = games.value.filter((g) => g !== game);
+    } catch (err) {
+        console.error("Failed to remove game:", err);
+    }
 }
 </script>
 
@@ -90,14 +117,18 @@ function removeGame(game: string) {
                         ><span class="toggle-pill-dot"></span
                     ></span>
                 </button>
-                <button class="menu-item" type="button">
+                <button
+                    class="menu-item"
+                    type="button"
+                    @click="toggleAutoConnect"
+                >
                     <div class="menu-item-label">
                         <span>Auto connect on game launch</span>
                         <span class="menu-item-desc"
                             >Connect the tunnel when a game starts</span
                         >
                     </div>
-                    <span class="toggle-pill"
+                    <span class="toggle-pill" :class="{ on: autoConnect }"
                         ><span class="toggle-pill-dot"></span
                     ></span>
                 </button>

@@ -1,6 +1,9 @@
 mod config;
+mod settings;
 
 use std::{fs, os::windows::process::CommandExt};
+
+use settings::SharedSettings;
 
 use tauri::{
     menu::{Menu, MenuItem},
@@ -578,6 +581,157 @@ fn set_launch_on_startup(enabled: bool, app: tauri::AppHandle) -> Result<(), Str
     Ok(())
 }
 
+/// Absolute path to the JSON file that persists app settings (the monitored
+/// games + the auto-connect flag), inside the OS app-config dir.
+fn settings_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    let dir = app
+        .path()
+        .app_config_dir()
+        .map_err(|e| format!("could not resolve config dir: {e}"))?;
+    Ok(dir.join("settings.json"))
+}
+
+#[tauri::command]
+fn get_auto_connect(settings: tauri::State<'_, SharedSettings>) -> Result<bool, String> {
+    Ok(settings
+        .lock()
+        .map(|s| s.auto_connect_on_game)
+        .unwrap_or(false))
+}
+
+#[tauri::command]
+fn set_auto_connect(
+    enabled: bool,
+    app: tauri::AppHandle,
+    settings: tauri::State<'_, SharedSettings>,
+) -> Result<(), String> {
+    if let Ok(mut s) = settings.lock() {
+        s.auto_connect_on_game = enabled;
+        let path = settings_path(&app)?;
+        s.save(&path);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn get_monitored_games(settings: tauri::State<'_, SharedSettings>) -> Result<Vec<String>, String> {
+    Ok(settings
+        .lock()
+        .map(|s| s.monitored_games.clone())
+        .unwrap_or_default())
+}
+
+#[tauri::command]
+fn add_monitored_game(
+    name: String,
+    app: tauri::AppHandle,
+    settings: tauri::State<'_, SharedSettings>,
+) -> Result<(), String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("game name is required".to_string());
+    }
+    let normalized = settings::normalize_game(name);
+    if let Ok(mut s) = settings.lock() {
+        if !s.monitored_games.iter().any(|g| settings::normalize_game(g) == normalized) {
+            s.monitored_games.push(name.to_string());
+        }
+        let path = settings_path(&app)?;
+        s.save(&path);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn remove_monitored_game(
+    name: String,
+    app: tauri::AppHandle,
+    settings: tauri::State<'_, SharedSettings>,
+) -> Result<(), String> {
+    let normalized = settings::normalize_game(&name);
+    if let Ok(mut s) = settings.lock() {
+        s.monitored_games
+            .retain(|g| settings::normalize_game(g) != normalized);
+        let path = settings_path(&app)?;
+        s.save(&path);
+    }
+    Ok(())
+}
+
+/// Long-running background task that watches for monitored game processes and
+/// auto-connects (or disconnects) the VPN.
+///
+/// Polls every 2s. On the rising edge of "a monitored game is now running" it
+/// connects; on the falling edge ("no monitored game running anymore") it
+/// disconnects. Because actions are only taken on these edges:
+/// - a manually-disconnected VPN is not force-reconnected while a game keeps
+///   running (the user's manual action wins until the game is fully relaunched)
+/// - the daemon isn't hammered with `up`/`down` every tick.
+async fn watch_games(settings: SharedSettings) {
+    use std::time::Duration;
+    use sysinfo::System;
+
+    let mut system = System::new();
+    let mut game_was_running = false;
+    let poll_interval = Duration::from_secs(2);
+
+    loop {
+        let (enabled, games) = {
+            let s = settings.lock().unwrap_or_else(|p| p.into_inner());
+            (s.auto_connect_on_game, s.monitored_games.clone())
+        };
+
+        let any_running = if enabled && !games.is_empty() {
+            system.refresh_processes();
+            let game_names: Vec<String> = games
+                .iter()
+                .map(|g| settings::normalize_game(g))
+                .collect();
+            system.processes().values().any(|p| {
+                let name = settings::normalize_game(&p.name().to_string());
+                game_names.contains(&name)
+            })
+        } else {
+            false
+        };
+
+        if any_running && !game_was_running {
+            // Rising edge: a monitored game just launched -> connect.
+            game_was_running = true;
+            let cfg_path = helper_path("talkuwg.conf").unwrap_or_default();
+            // Ensure config is current, then bring the tunnel up (best effort;
+            // failures are logged so a hiccup doesn't kill the watcher).
+            if let Err(e) = config::ensure_config_up_to_date(&cfg_path).await {
+                println!("auto-connect: config refresh failed: {e}");
+            }
+            if let Err(e) = connect_vpn().await {
+                println!("auto-connect: connect failed: {e}");
+            } else {
+                println!("auto-connect: connected (game detected)");
+            }
+        } else if !any_running && game_was_running {
+            // Falling edge: last monitored game closed -> disconnect.
+            game_was_running = false;
+            match read_status_line().await {
+                Ok(line) if line.starts_with("connected") => {
+                    if let Err(e) = send_command_impl("down").await {
+                        println!("auto-connect: disconnect failed: {e}");
+                    } else {
+                        println!("auto-connect: disconnected (game closed)");
+                    }
+                }
+                Ok(_) => println!("auto-connect: not connected, nothing to tear down"),
+                Err(e) => println!("auto-connect: status check failed: {e}"),
+            }
+        } else {
+            // No state change; (re)sync tracking when the settings change.
+            game_was_running = any_running;
+        }
+
+        tokio::time::sleep(poll_interval).await;
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -593,6 +747,9 @@ pub fn run() {
             }
         }))
         .plugin(tauri_plugin_opener::init())
+        .manage(std::sync::Arc::new(std::sync::Mutex::new(
+            settings::AppSettings::default(),
+        )) as SharedSettings)
         .invoke_handler(tauri::generate_handler![
             get_connected_users_count,
             get_vpn_status,
@@ -601,7 +758,12 @@ pub fn run() {
             list_processes,
             collect_unreachable,
             get_launch_on_startup,
-            set_launch_on_startup
+            set_launch_on_startup,
+            get_auto_connect,
+            set_auto_connect,
+            get_monitored_games,
+            add_monitored_game,
+            remove_monitored_game
         ])
         .setup(|app| {
             if cfg!(target_os = "linux") {
@@ -612,6 +774,23 @@ pub fn run() {
                 if app_cache.exists() {
                     let _ = fs::remove_dir_all(&app_cache);
                 }
+            }
+
+            // Load persisted settings (monitored games + auto-connect flag) into
+            // the managed state, then start the background game watcher.
+            {
+                use tauri::Manager;
+                let shared: SharedSettings = app.state::<SharedSettings>().inner().clone();
+                if let Ok(path) = settings_path(app.handle()) {
+                    let loaded = settings::AppSettings::load(&path);
+                    if let Ok(mut s) = shared.lock() {
+                        *s = loaded;
+                    }
+                }
+                let watcher_settings = shared.clone();
+                tauri::async_runtime::spawn(async move {
+                    watch_games(watcher_settings).await;
+                });
             }
 
             let show_i = MenuItem::with_id(app, "show", "Show", true, None::<&str>)?;

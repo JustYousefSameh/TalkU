@@ -4409,6 +4409,7 @@ dependencies = [
  "tauri-plugin-single-instance",
  "tokio",
  "windows-service",
+ "winreg 0.55.0",
 ]
 
 [[package]]
