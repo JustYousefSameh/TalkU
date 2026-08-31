@@ -53,9 +53,10 @@ watch(status, (next, prev) => {
             <ConnectionTimer :status="status" />
             <ActiveUsers />
             <ErrorBox
-                v-if="errorMessage"
-                :message="errorMessage"
-                @retry="onRetry"
+                :open="errorMessage !== null"
+                title="Connection failed"
+                :message="errorMessage || ''"
+                @confirm="onRetry"
                 @cancel="errorMessage = null"
             />
             <div class="socials">

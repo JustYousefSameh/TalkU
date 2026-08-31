@@ -126,8 +126,9 @@ async fn open_pipe() -> Result<tokio::net::windows::named_pipe::NamedPipeClient,
 /// Persistent named-pipe connection, opened lazily on first use and reused for
 /// every real command (websocket-style). Guarded by a tokio mutex so only one
 /// request is in flight at a time; the guard is Send-safe across awaits.
-static PIPE_CONN: std::sync::OnceLock<tokio::sync::Mutex<Option<tokio::net::windows::named_pipe::NamedPipeClient>>> =
-    std::sync::OnceLock::new();
+static PIPE_CONN: std::sync::OnceLock<
+    tokio::sync::Mutex<Option<tokio::net::windows::named_pipe::NamedPipeClient>>,
+> = std::sync::OnceLock::new();
 
 /// Read a single newline-terminated line directly from a named-pipe client,
 /// chunk-by-chunk, stopping at the first `\n`. Mirrors `read_pipe_command` on
@@ -259,13 +260,9 @@ async fn send_command(cmd: &str) -> Result<String, String> {
     send_command_impl(cmd).await
 }
 
-/// Send a command over the persistent named-pipe connection without ensuring
-/// the daemon is running. The connection is opened once on first use and reused
-/// for every subsequent command (websocket-style): we write `cmd\n` and read
-/// the single-line reply. If the connection is broken or closed, it is dropped
-/// so the next call reopens it. Used for best-effort work (like
-/// disconnect-on-exit) where starting the service would be undesirable.
-async fn send_command_impl(cmd: &str) -> Result<String, String> {
+/// Send a command over the persistent named-pipe connection, waiting up to
+/// `timeout_ms` for the reply.
+async fn send_command_impl_timeout(cmd: &str, timeout_ms: u64) -> Result<String, String> {
     use tokio::io::AsyncWriteExt;
     use tokio::time::{timeout, Duration};
 
@@ -280,7 +277,7 @@ async fn send_command_impl(cmd: &str) -> Result<String, String> {
     let stream = guard.as_mut().expect("connection just ensured");
     let req = format!("{cmd}\n");
 
-    if let Err(e) = timeout(Duration::from_millis(10000), stream.write_all(req.as_bytes()))
+    if let Err(e) = timeout(Duration::from_millis(timeout_ms), stream.write_all(req.as_bytes()))
         .await
         .map_err(|_| format!("Timed out sending command {cmd}"))?
     {
@@ -289,7 +286,7 @@ async fn send_command_impl(cmd: &str) -> Result<String, String> {
         return Err(format!("Failed to send command: {e}"));
     }
 
-    match read_pipe_line(stream, 10000).await {
+    match read_pipe_line(stream, timeout_ms).await {
         Ok(line) => Ok(line),
         Err(e) => {
             // A failed read usually means the daemon closed the connection.
@@ -297,6 +294,13 @@ async fn send_command_impl(cmd: &str) -> Result<String, String> {
             Err(format!("{e} (for {cmd})"))
         }
     }
+}
+
+/// Send a command over the persistent named-pipe connection with a 10s default
+/// reply timeout. Used for best-effort work (like disconnect-on-exit) where
+/// starting the service would be undesirable.
+async fn send_command_impl(cmd: &str) -> Result<String, String> {
+    send_command_impl_timeout(cmd, 10000).await
 }
 
 /// Best-effort clean disconnect used right before the app exits. Only sends
@@ -414,7 +418,9 @@ fn list_processes() -> Result<Vec<ProcessInfo>, String> {
         .map(|(pid, p)| {
             let sys = pid.as_u32() <= 4
                 || p.session_id().map_or(false, |s| s.as_u32() == 0)
-                || SYSTEM_PROCESS_NAMES.iter().any(|n| p.name().eq_ignore_ascii_case(n));
+                || SYSTEM_PROCESS_NAMES
+                    .iter()
+                    .any(|n| p.name().eq_ignore_ascii_case(n));
             (*pid, sys)
         })
         .collect();
@@ -446,9 +452,10 @@ fn list_processes() -> Result<Vec<ProcessInfo>, String> {
         }
 
         let name = p.name().to_string();
-        let entry = by_name
-            .entry(name)
-            .or_insert((pid.as_u32(), 0, p.cpu_usage(), p.memory() / 1024));
+        let entry =
+            by_name
+                .entry(name)
+                .or_insert((pid.as_u32(), 0, p.cpu_usage(), p.memory() / 1024));
         if pid.as_u32() < entry.0 {
             entry.0 = pid.as_u32();
         }
@@ -469,6 +476,30 @@ fn list_processes() -> Result<Vec<ProcessInfo>, String> {
     Ok(list)
 }
 
+/// Tell the daemon to run its `unreachable` scan on a process. The scan runs in
+/// the background on the daemon side (it never blocks the pipe for other
+/// commands), so this returns right away with `ok`, `busy` (a scan is already
+/// running), or an `error`. Results are not returned to the client.
+#[tauri::command]
+async fn collect_unreachable(process_name: String, seconds: Option<u32>) -> Result<(), String> {
+    if process_name.trim().is_empty() {
+        return Err("missing process name".to_string());
+    }
+    let secs = seconds.unwrap_or(30).max(1);
+    let cmd = format!("unreachable {} {}", process_name.trim(), secs);
+    let response = send_command(&cmd).await?;
+    let response = response.trim();
+    if response == "ok" {
+        Ok(())
+    } else if response == "busy" {
+        Err("A scan is already running for another process".to_string())
+    } else if response.starts_with("error") {
+        Err(response.to_string())
+    } else {
+        Err(format!("Unexpected daemon response: {response}"))
+    }
+}
+
 const API_URL: &str = "https://talku.ddns.net:8000/";
 #[derive(serde::Deserialize)]
 struct ConnectedUsersResponse {
@@ -486,8 +517,6 @@ async fn get_connected_users_count() -> Result<i32, String> {
         .json::<ConnectedUsersResponse>()
         .await
         .map_err(|e| format!("Failed to parse response: {}", e))?;
-
-    println!("{}", body.connected_users);
 
     Ok(body.connected_users)
 }
@@ -512,7 +541,8 @@ pub fn run() {
             get_vpn_status,
             check_config_and_connect,
             disconnect_vpn,
-            list_processes
+            list_processes,
+            collect_unreachable
         ])
         .setup(|app| {
             if cfg!(target_os = "linux") {

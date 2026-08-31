@@ -3,8 +3,6 @@ use std::process::ExitCode;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use windows_sys::Win32::Foundation::LocalFree;
-use windows_sys::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
 
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
@@ -578,7 +576,10 @@ fn unreachable_ips(process_name: &str, duration_secs: u64) -> Result<Vec<String>
     use sysinfo::System;
 
     let requested = process_name.trim().to_lowercase();
-    let requested_plain = requested.strip_suffix(".exe").unwrap_or(&requested).to_string();
+    let requested_plain = requested
+        .strip_suffix(".exe")
+        .unwrap_or(&requested)
+        .to_string();
 
     // 1. Map process name -> PIDs. If nothing matches yet (e.g. the process
     //    hasn't started, or the name is slightly wrong) we DON'T bail: the loop
@@ -653,42 +654,34 @@ fn unreachable_ips(process_name: &str, duration_secs: u64) -> Result<Vec<String>
     Ok(ips)
 }
 
-/// Replace characters that Windows forbids in file names so a process name or
-/// `ip:port` pair can safely appear in the report file name.
-fn sanitize_file_name(s: &str) -> String {
-    s.chars()
-        .map(|c| {
-            if matches!(
-                c,
-                '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | '\n' | '\r'
-            ) {
-                '_'
-            } else {
-                c
-            }
-        })
-        .collect()
-}
+const API_URL: &str = "https://talku.ddns.net:8000/";
 
-/// Save a capture to `<process-name>_<ip:port>_<ip:port>...txt` next to the
-/// executable (one endpoint per line). Returns the full path written.
-fn write_unreachable_report(
-    process_name: &str,
-    ips: &[String],
-) -> Result<std::path::PathBuf, String> {
-    let mut base = sanitize_file_name(process_name.trim());
-    if !ips.is_empty() {
-        base.push('_');
-        base.push_str(&sanitize_file_name(&ips.join("_")));
+/// Report the unreachable endpoints for a process to the remote API via a PUT
+/// to `{API_URL}unreachable_report/`. The server expects a JSON body of the
+/// form `{"process": "...", "ips": ["ip:port", ...]}`.
+fn send_unreachable_report(process_name: &str, ips: &[String]) -> Result<(), String> {
+    let url = format!("{}unreachable_report/", API_URL.trim_end_matches('/'));
+    let body = serde_json::json!({
+        "process": process_name,
+        "ips": ips,
+    });
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+        .map_err(|e| format!("failed to build http client: {e}"))?;
+
+    let resp = client
+        .put(&url)
+        .json(&body)
+        .send()
+        .map_err(|e| format!("failed to send unreachable report: {e}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        return Err(format!("unreachable report rejected: HTTP {status}"));
     }
-    let path = exe_dir()?.join(format!("{base}.txt"));
-    let mut content = String::new();
-    for ip in ips {
-        content.push_str(ip);
-        content.push('\n');
-    }
-    std::fs::write(&path, content).map_err(|e| format!("failed to write report: {e}"))?;
-    Ok(path)
+    Ok(())
 }
 
 /// Run `talku-cli daemon` (the dev/manual fallback when the TalkUCLI service is
@@ -710,7 +703,8 @@ fn run_daemon() -> ExitCode {
         }
     };
     log("daemon: starting named-pipe server on \\\\.\\pipe\\TalkUCLI");
-    let _ = runtime.block_on(run_pipe_server(daemon));
+    let unreachable_busy = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let _ = runtime.block_on(run_pipe_server(daemon, unreachable_busy));
     ExitCode::SUCCESS
 }
 
@@ -782,6 +776,7 @@ fn service_main(_arguments: Vec<std::ffi::OsString>) {
 
     let daemon = Arc::new(Mutex::new(Daemon::default()));
     let daemon_for_pipe = daemon.clone();
+    let unreachable_busy = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     // Host the tokio named-pipe server on a background thread. We keep the
     // service thread blocked here so the service stays alive until stopped.
@@ -800,7 +795,7 @@ fn service_main(_arguments: Vec<std::ffi::OsString>) {
     let _runtime_thread = {
         let runtime = runtime;
         std::thread::spawn(move || {
-            let _ = runtime.block_on(run_pipe_server(daemon_for_pipe));
+            let _ = runtime.block_on(run_pipe_server(daemon_for_pipe, unreachable_busy));
         })
     };
 
@@ -835,7 +830,10 @@ fn service_stopped_status() -> windows_service::service::ServiceStatus {
 /// clients keep working. Also logs a heartbeat every 2s proving the daemon is
 /// still alive and the pipe is still listening.
 #[cfg(windows)]
-async fn run_pipe_server(daemon: Arc<Mutex<Daemon>>) {
+async fn run_pipe_server(
+    daemon: Arc<Mutex<Daemon>>,
+    unreachable_busy: Arc<std::sync::atomic::AtomicBool>,
+) {
     use std::ffi::c_void;
     use std::ptr;
 
@@ -847,15 +845,6 @@ async fn run_pipe_server(daemon: Arc<Mutex<Daemon>>) {
         ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
     };
     use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
-
-    // Heartbeat
-    let mut interval = time::interval(time::Duration::from_secs(2));
-    tokio::spawn(async move {
-        loop {
-            interval.tick().await;
-            log("service: alive (pipe listening)");
-        }
-    });
 
     let sddl = "D:(A;;GA;;;WD)\0";
     let wide_sddl: Vec<u16> = sddl.encode_utf16().collect();
@@ -909,8 +898,9 @@ async fn run_pipe_server(daemon: Arc<Mutex<Daemon>>) {
             break;
         }
 
-        let daemon = daemon.clone();
-        tokio::spawn(handle_pipe_conn(daemon, server));
+        let daemon_c = daemon.clone();
+        let busy = unreachable_busy.clone();
+        tokio::spawn(handle_pipe_conn(daemon_c, busy, server));
 
         // 3. APPLY the custom security attributes directly inline (No closure needed!)
         match unsafe {
@@ -942,6 +932,7 @@ async fn run_pipe_server(daemon: Arc<Mutex<Daemon>>) {
 #[cfg(windows)]
 async fn handle_pipe_conn(
     daemon: Arc<Mutex<Daemon>>,
+    unreachable_busy: Arc<std::sync::atomic::AtomicBool>,
     mut stream: tokio::net::windows::named_pipe::NamedPipeServer,
 ) {
     use tokio::io::AsyncWriteExt;
@@ -966,10 +957,14 @@ async fn handle_pipe_conn(
         }
 
         // `unreachable <process-name> [seconds]`: listen over the given process
-        // for `seconds` (default 30) and report the remote endpoints it is
-        // stuck trying to connect to (SYN_SENT). Doesn't touch the daemon, so
-        // handle it outside the daemon lock; `sysinfo`/`netstat2` are
-        // blocking, so run them on a blocking thread.
+        // for `seconds` (default 30) and report the remote endpoints it is stuck
+        // trying to reach (SYN_SENT). This runs in the BACKGROUND so it never
+        // blocks the pipe for other commands: if a scan is already running it
+        // replies `busy` immediately; otherwise it replies `ok` right away and
+        // runs the (slow, blocking) scan on a dedicated task. `sysinfo` and
+        // `netstat2` are blocking, so the scan itself runs on a blocking thread.
+        // Results are NOT sent back to the client; they are logged (and written
+        // to a report file next to the executable).
         if let Some(rest) = cmd.strip_prefix("unreachable") {
             let mut parts = rest.split_whitespace();
             let name = parts.next().unwrap_or("").to_string();
@@ -979,18 +974,34 @@ async fn handle_pipe_conn(
                 .unwrap_or(30);
             let response = if name.is_empty() {
                 "error missing process name".to_string()
+            } else if unreachable_busy.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                "busy".to_string()
             } else {
-                match tokio::task::spawn_blocking(move || unreachable_ips(&name, secs)).await {
-                    Ok(Ok(ips)) => {
-                        if ips.is_empty() {
-                            "none".to_string()
-                        } else {
-                            ips.join(",")
+                // Single-flight acquired: run the scan in the background and
+                // clear the flag when it finishes. Reply `ok` immediately.
+                let busy = unreachable_busy.clone();
+                tokio::spawn(async move {
+                    let scan_name = name.clone();
+                    let result =
+                        tokio::task::spawn_blocking(move || unreachable_ips(&scan_name, secs))
+                            .await;
+                    match result {
+                        Ok(Ok(ips)) => {
+                            log(&format!("unreachable: {name} -> {} endpoint(s)", ips.len()));
+                            if !ips.is_empty() {
+                                if let Err(e) = send_unreachable_report(&name, &ips) {
+                                    log(&format!("unreachable: report failed: {e}"));
+                                } else {
+                                    log("unreachable: report sent to API");
+                                }
+                            }
                         }
+                        Ok(Err(e)) => log(&format!("unreachable: {name} failed: {e}")),
+                        Err(e) => log(&format!("unreachable: {name} panic: {e}")),
                     }
-                    Ok(Err(e)) => format!("error {e}"),
-                    Err(e) => format!("error {e}"),
-                }
+                    busy.store(false, std::sync::atomic::Ordering::SeqCst);
+                });
+                "ok".to_string()
             };
             let mut buf = response;
             buf.push('\n');
@@ -1216,15 +1227,14 @@ fn cli_main() -> ExitCode {
                 eprintln!("monitoring '{name}' for {secs}s ...");
             }
             match unreachable_ips(&name, secs).and_then(|ips| {
-                let path = write_unreachable_report(&name, &ips)?;
-                Ok((ips, path))
+                if ips.is_empty() {
+                    return Ok(ips);
+                }
+                send_unreachable_report(&name, &ips)?;
+                Ok(ips)
             }) {
-                Ok((ips, path)) => {
-                    eprintln!(
-                        "saved {} endpoint(s) to {}",
-                        ips.len(),
-                        path.display()
-                    );
+                Ok(ips) => {
+                    eprintln!("sent {} endpoint(s) to API", ips.len());
                     ExitCode::SUCCESS
                 }
                 Err(e) => {

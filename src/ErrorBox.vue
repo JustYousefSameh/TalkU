@@ -1,53 +1,80 @@
 <script setup lang="ts">
-defineProps<{
-    message: string;
-}>();
+import { computed, ref, watch, withDefaults } from "vue";
+
+const props = withDefaults(
+    defineProps<{
+        message: string;
+        title?: string;
+        variant?: "error" | "success";
+        confirmText?: string;
+        cancelText?: string;
+        showCancel?: boolean;
+        open?: boolean;
+    }>(),
+    {
+        variant: "error",
+        confirmText: "Retry",
+        cancelText: "Cancel",
+        showCancel: true,
+        open: true,
+    }
+);
 
 const emit = defineEmits<{
-    (e: "retry"): void;
+    (e: "confirm"): void;
     (e: "cancel"): void;
 }>();
+
+const icon = computed(() => (props.variant === "success" ? "✓" : "!"));
+const isError = computed(() => props.variant === "error");
+
+// Own the show/hide internally so the leave transition can play before the
+// overlay unmounts (it must stay in the DOM long enough to animate out).
+const visible = ref(props.open);
+watch(
+    () => props.open,
+    (o) => {
+        visible.value = o;
+    }
+);
 </script>
 
 <template>
-    <div class="error-overlay">
-        <div class="error-box">
-            <div class="error-icon" aria-hidden="true">!</div>
-            <p class="error-message">{{ message }}</p>
-            <div class="error-actions">
-                <button
-                    type="button"
-                    class="btn btn-cancel"
-                    @click="emit('cancel')"
-                >
-                    Cancel
-                </button>
-                <button
-                    type="button"
-                    class="btn btn-retry"
-                    @click="emit('retry')"
-                >
-                    Retry
-                </button>
+    <Teleport to="body">
+        <Transition name="popup">
+            <div v-if="visible" class="popup-overlay" @click.self="emit('cancel')">
+                <div class="popup-box">
+                    <div class="popup-icon" :class="{ success: !isError }" aria-hidden="true">
+                        {{ icon }}
+                    </div>
+                    <p v-if="title" class="popup-title">{{ title }}</p>
+                    <p class="popup-message">{{ message }}</p>
+                    <div class="popup-actions">
+                        <button v-if="showCancel" type="button" class="btn btn-cancel" @click="emit('cancel')">
+                            {{ cancelText }}
+                        </button>
+                        <button type="button" class="btn btn-confirm" @click="emit('confirm')">
+                            {{ confirmText }}
+                        </button>
+                    </div>
+                </div>
             </div>
-        </div>
-    </div>
+        </Transition>
+    </Teleport>
 </template>
 
 <style scoped>
-.error-overlay {
+.popup-overlay {
     position: fixed;
     inset: 0;
     display: flex;
     align-items: center;
     justify-content: center;
     background: rgba(0, 0, 0, 0.55);
-    border-radius: 12px;
-    overflow: hidden;
-    z-index: 100;
+    z-index: 2000;
 }
 
-.error-box {
+.popup-box {
     width: 300px;
     max-width: 84vw;
     padding: 28px 24px 20px;
@@ -64,15 +91,11 @@ const emit = defineEmits<{
     gap: 14px;
 }
 
-.error-icon {
+.popup-icon {
     width: 52px;
     height: 52px;
     border-radius: 50%;
-    background: radial-gradient(
-        circle at 30% 25%,
-        #ed4444 0%,
-        #b81a15 70%
-    );
+    background: radial-gradient(circle at 30% 25%, #ed4444 0%, #b81a15 70%);
     color: #fff;
     font-family: "Product Sans", "Roboto", sans-serif;
     font-size: 30px;
@@ -84,7 +107,21 @@ const emit = defineEmits<{
     box-shadow: 0 4px 18px rgba(184, 26, 21, 0.45);
 }
 
-.error-message {
+.popup-icon.success {
+    background: radial-gradient(circle at 30% 25%, #2aa84f 0%, #176037 70%);
+    box-shadow: 0 4px 18px rgba(35, 164, 70, 0.45);
+}
+
+.popup-title {
+    margin: 0;
+    color: #f4f4f8;
+    font-family: "Roboto", sans-serif;
+    font-size: 16px;
+    font-weight: 700;
+    text-align: center;
+}
+
+.popup-message {
     margin: 0;
     color: #d6d6db;
     font-family: "Roboto", sans-serif;
@@ -96,7 +133,7 @@ const emit = defineEmits<{
     overflow-y: auto;
 }
 
-.error-actions {
+.popup-actions {
     display: flex;
     gap: 12px;
     width: 100%;
@@ -128,13 +165,33 @@ const emit = defineEmits<{
     background: rgba(255, 255, 255, 0.14);
 }
 
-.btn-retry {
+.btn-confirm {
     background: linear-gradient(180deg, #1d7a38 0%, #145c28 100%);
     color: #d9ffe4;
     box-shadow: 0 4px 16px rgba(35, 164, 70, 0.35);
 }
 
-.btn-retry:hover {
+.btn-confirm:hover {
     background: linear-gradient(180deg, #239347 0%, #1a6e32 100%);
+}
+
+.popup-enter-active,
+.popup-leave-active {
+    transition: opacity 0.22s ease;
+}
+
+.popup-enter-from,
+.popup-leave-to {
+    opacity: 0;
+}
+
+.popup-enter-active .popup-box,
+.popup-leave-active .popup-box {
+    transition: transform 0.22s ease;
+}
+
+.popup-enter-from .popup-box,
+.popup-leave-to .popup-box {
+    transform: translateY(18px);
 }
 </style>

@@ -497,11 +497,14 @@ function removeGame(game: string) {
 
 .menu-fade-enter-active,
 .menu-fade-leave-active {
-    transition: opacity 0.14s ease;
+    transition:
+        opacity 0.22s ease,
+        transform 0.22s ease;
 }
 
 .menu-fade-enter-from,
 .menu-fade-leave-to {
     opacity: 0;
+    transform: translate(-50%, -47%) translateY(18px);
 }
 </style>
