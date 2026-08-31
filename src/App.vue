@@ -88,7 +88,7 @@ onUnmounted(() => {
                 @error="onSliderError"
             />
             <ConnectionTimer :status="status" />
-            <ActiveUsers />
+            <ActiveUsers :status="status" />
             <ErrorBox
                 :open="boxMessage !== null"
                 :title="boxTitle"

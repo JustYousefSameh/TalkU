@@ -1,15 +1,44 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from "vue";
+import { ref, computed, watch, onMounted, onUnmounted } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import type { Status } from "./types";
 
-const connectedUsers = ref<number>(0);
+const props = defineProps<{
+    status: Status;
+}>();
+
+const baseCount = ref<number>(0);
+const fakeBonus = ref<number>(0);
+const shown = computed(() => baseCount.value + fakeBonus.value);
+
 let interval: number | undefined;
+let bonusTimer: number | undefined;
+
+function applyBonus(delta: number) {
+    fakeBonus.value += delta;
+    if (bonusTimer !== undefined) window.clearTimeout(bonusTimer);
+    bonusTimer = window.setTimeout(() => {
+        fakeBonus.value = 0;
+        bonusTimer = undefined;
+    }, 120000);
+}
+
+watch(
+    () => props.status,
+    (next, prev) => {
+        if (next === "connected" && prev !== "connected") {
+            // Just connected -> fake +1 as instant feedback, removed after 2 min.
+            applyBonus(1);
+        } else if (next === "disconnected" && prev !== "disconnected") {
+            // Just disconnected -> fake -1 as instant feedback, removed after 2 min.
+            applyBonus(-1);
+        }
+    },
+);
 
 async function refresh() {
     try {
-        connectedUsers.value = await invoke<number>(
-            "get_connected_users_count",
-        );
+        baseCount.value = await invoke<number>("get_connected_users_count");
     } catch (err) {
         console.error(err);
     }
@@ -22,6 +51,7 @@ onMounted(() => {
 
 onUnmounted(() => {
     if (interval !== undefined) window.clearInterval(interval);
+    if (bonusTimer !== undefined) window.clearTimeout(bonusTimer);
 });
 </script>
 
@@ -32,9 +62,7 @@ onUnmounted(() => {
         <div class="dot"></div>
         <span class="text-gray-400 text-xs overflow-hidden leading-none">
             <Transition name="count-flow" mode="out-in">
-                <span :key="connectedUsers" class="inline-block">{{
-                    connectedUsers
-                }}</span>
+                <span :key="shown" class="inline-block">{{ shown }}</span>
             </Transition>
         </span>
     </main>
