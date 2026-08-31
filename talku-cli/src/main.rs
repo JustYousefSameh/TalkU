@@ -660,7 +660,7 @@ const API_URL: &str = "https://talku.ddns.net:8000/";
 /// to `{API_URL}unreachable_report/`. The server expects a JSON body of the
 /// form `{"process": "...", "ips": ["ip:port", ...]}`.
 fn send_unreachable_report(process_name: &str, ips: &[String]) -> Result<(), String> {
-    let url = format!("{}unreachable_report/", API_URL.trim_end_matches('/'));
+    let url = format!("{}/unreachable_report/", API_URL.trim_end_matches('/'));
     let body = serde_json::json!({
         "process": process_name,
         "ips": ips,
@@ -669,7 +669,7 @@ fn send_unreachable_report(process_name: &str, ips: &[String]) -> Result<(), Str
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(15))
         .build()
-        .map_err(|e| format!("failed to build http client: {e}"))?;
+        .map_err(|e| format!("failed to build http client: {e:?}"))?;
 
     let resp = client
         .put(&url)
