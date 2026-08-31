@@ -8,7 +8,7 @@ use settings::SharedSettings;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::TrayIconBuilder,
-    Manager,
+    Emitter, Manager,
 };
 
 fn helper_path(file_name: &str) -> Result<std::path::PathBuf, String> {
@@ -659,15 +659,19 @@ fn remove_monitored_game(
 }
 
 /// Long-running background task that watches for monitored game processes and
-/// auto-connects (or disconnects) the VPN.
+/// notifies the UI when it should auto-connect (or disconnect) the VPN.
 ///
 /// Polls every 2s. On the rising edge of "a monitored game is now running" it
-/// connects; on the falling edge ("no monitored game running anymore") it
-/// disconnects. Because actions are only taken on these edges:
+/// emits a `game-connect` event; on the falling edge ("no monitored game running
+/// anymore") it emits `game-disconnect`. The UI listens for these events and runs
+/// the same connect/disconnect flow as a button click, so the app state, sounds,
+/// and visual feedback all update as if the user had clicked.
+///
+/// Because events are only emitted on these edges:
 /// - a manually-disconnected VPN is not force-reconnected while a game keeps
 ///   running (the user's manual action wins until the game is fully relaunched)
-/// - the daemon isn't hammered with `up`/`down` every tick.
-async fn watch_games(settings: SharedSettings) {
+/// - the UI isn't spammed with redundant connect/disconnect every tick.
+async fn watch_games(app: tauri::AppHandle, settings: SharedSettings) {
     use std::time::Duration;
     use sysinfo::System;
 
@@ -696,35 +700,18 @@ async fn watch_games(settings: SharedSettings) {
         };
 
         if any_running && !game_was_running {
-            // Rising edge: a monitored game just launched -> connect.
+            // Rising edge: a monitored game just launched. Ask the UI to run its
+            // normal connect flow. The window stays hidden in the tray if it was
+            // already hidden (e.g. launched with --autostart).
             game_was_running = true;
-            let cfg_path = helper_path("talkuwg.conf").unwrap_or_default();
-            // Ensure config is current, then bring the tunnel up (best effort;
-            // failures are logged so a hiccup doesn't kill the watcher).
-            if let Err(e) = config::ensure_config_up_to_date(&cfg_path).await {
-                println!("auto-connect: config refresh failed: {e}");
-            }
-            if let Err(e) = connect_vpn().await {
-                println!("auto-connect: connect failed: {e}");
-            } else {
-                println!("auto-connect: connected (game detected)");
-            }
+            let _ = app.emit("game-connect", ());
         } else if !any_running && game_was_running {
-            // Falling edge: last monitored game closed -> disconnect.
+            // Falling edge: last monitored game closed -> ask the UI to run its
+            // normal disconnect flow.
             game_was_running = false;
-            match read_status_line().await {
-                Ok(line) if line.starts_with("connected") => {
-                    if let Err(e) = send_command_impl("down").await {
-                        println!("auto-connect: disconnect failed: {e}");
-                    } else {
-                        println!("auto-connect: disconnected (game closed)");
-                    }
-                }
-                Ok(_) => println!("auto-connect: not connected, nothing to tear down"),
-                Err(e) => println!("auto-connect: status check failed: {e}"),
-            }
+            let _ = app.emit("game-disconnect", ());
         } else {
-            // No state change; (re)sync tracking when the settings change.
+            // No edge; keep tracking current state (e.g. if settings changed).
             game_was_running = any_running;
         }
 
@@ -788,8 +775,9 @@ pub fn run() {
                     }
                 }
                 let watcher_settings = shared.clone();
+                let watcher_app = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
-                    watch_games(watcher_settings).await;
+                    watch_games(watcher_app, watcher_settings).await;
                 });
             }
 

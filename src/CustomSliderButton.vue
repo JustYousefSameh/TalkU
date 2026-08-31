@@ -111,7 +111,21 @@ async function retryLastAction() {
     }
 }
 
-defineExpose({ retryLastAction });
+/// Runs the same connect/disconnect flow as a button click, but in a forced
+/// direction. No-ops if the VPN is already in the requested state, so a manual
+/// action (e.g. the user already connected) is not overridden. Used by the
+/// auto-connect game watcher via a Tauri event.
+async function autoAction(action: "connect" | "disconnect") {
+    if (busy || props.status === "connecting") return;
+    if (action === "connect" && props.status === "connected") return; // already connected
+    if (action === "disconnect" && props.status === "disconnected") return; // already disconnected
+    lastAction = action;
+    emit("update:status", action === "disconnect" ? "disconnected" : "connecting");
+    if (action === "disconnect") await disconnect();
+    else await connect();
+}
+
+defineExpose({ retryLastAction, autoAction });
 
 async function pollUntilConnected(): Promise<Status> {
     const deadline = Date.now() + 30000;

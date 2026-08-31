@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { ref, watch } from "vue";
+import { ref, watch, onMounted, onUnmounted } from "vue";
+import { listen } from "@tauri-apps/api/event";
 import AppBar from "./AppBar.vue";
 import CustomSliderButton from "./CustomSliderButton.vue";
 import SocialLink from "./SocialLink.vue";
@@ -53,6 +54,26 @@ watch(status, (next, prev) => {
     if (prev === next) return;
     if (next === "connected") playSound(connectSound);
     else if (next === "disconnected") playSound(disconnectSound);
+});
+
+// Auto-connect on game launch: the Rust game watcher emits events on the
+// rising/falling edge of a monitored game process, and we run the exact same
+// connect/disconnect flow as a button click so the UI updates.
+let unlistenConnect: (() => void) | null = null;
+let unlistenDisconnect: (() => void) | null = null;
+
+onMounted(async () => {
+    unlistenConnect = await listen("game-connect", () => {
+        sliderRef.value?.autoAction("connect");
+    });
+    unlistenDisconnect = await listen("game-disconnect", () => {
+        sliderRef.value?.autoAction("disconnect");
+    });
+});
+
+onUnmounted(() => {
+    unlistenConnect?.();
+    unlistenDisconnect?.();
 });
 </script>
 
