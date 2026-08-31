@@ -523,6 +523,61 @@ async fn get_connected_users_count() -> Result<i32, String> {
     Ok(body.connected_users)
 }
 
+/// Registry value name under which the app registers itself for autostart.
+const AUTOSTART_REG_NAME: &str = "TalkU";
+
+/// Path (`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`) used to launch
+/// the app at logon. Only touches the current user's key, so no elevation is
+/// needed.
+fn autostart_reg_path() -> winreg::RegKey {
+    use winreg::enums::HKEY_CURRENT_USER;
+    winreg::RegKey::predef(HKEY_CURRENT_USER)
+        .open_subkey_with_flags(
+            r"Software\Microsoft\Windows\CurrentVersion\Run",
+            winreg::enums::KEY_READ | winreg::enums::KEY_WRITE,
+        )
+        .unwrap_or_else(|_| {
+            winreg::RegKey::predef(HKEY_CURRENT_USER)
+                .create_subkey(r"Software\Microsoft\Windows\CurrentVersion\Run")
+                .unwrap()
+                .0
+        })
+}
+
+/// Is the app currently set to launch on sign-in?
+#[tauri::command]
+fn get_launch_on_startup() -> Result<bool, String> {
+    let reg = autostart_reg_path();
+    match reg.get_value::<String, _>(AUTOSTART_REG_NAME) {
+        Ok(v) => Ok(!v.is_empty()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(format!("failed to read autostart setting: {e}")),
+    }
+}
+
+/// Enable or disable launching the app when the user signs in. Enabled writes
+/// the full path to this executable (with `--autostart`, so a startup run
+/// starts hidden/background); disabled removes the value.
+#[tauri::command]
+fn set_launch_on_startup(enabled: bool, app: tauri::AppHandle) -> Result<(), String> {
+    let reg = autostart_reg_path();
+    if enabled {
+        let exe = std::env::current_exe()
+            .map_err(|e| format!("failed to get exe path: {e}"))?;
+        let cmd = format!("\"{}\" --autostart", exe.display());
+        reg.set_value(AUTOSTART_REG_NAME, &cmd)
+            .map_err(|e| format!("failed to enable autostart: {e}"))?;
+    } else {
+        match reg.delete_value(AUTOSTART_REG_NAME) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("failed to disable autostart: {e}")),
+        }
+    }
+    let _ = app;
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -544,7 +599,9 @@ pub fn run() {
             check_config_and_connect,
             disconnect_vpn,
             list_processes,
-            collect_unreachable
+            collect_unreachable,
+            get_launch_on_startup,
+            set_launch_on_startup
         ])
         .setup(|app| {
             if cfg!(target_os = "linux") {
@@ -597,6 +654,15 @@ pub fn run() {
                     _ => {}
                 })
                 .build(app)?;
+
+            // When launched via the registry Run entry (`--autostart`), start
+            // hidden in the tray rather than showing the window.
+            #[cfg(windows)]
+            if std::env::args().any(|a| a == "--autostart") {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.hide();
+                }
+            }
 
             Ok(())
         })

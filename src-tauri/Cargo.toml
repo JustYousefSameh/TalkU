@@ -33,3 +33,4 @@ sysinfo = "0.30"
 
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.7"
+winreg = "0.55"

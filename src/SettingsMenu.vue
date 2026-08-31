@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { onMounted, ref } from "vue";
+import { invoke } from "@tauri-apps/api/core";
 import { Settings, Gamepad2, Plus, Check, X, Trash2, Monitor } from "lucide-vue-next";
 
 defineProps<{
@@ -14,6 +15,25 @@ const games = ref<string[]>([]);
 const addingGame = ref(false);
 const newGame = ref("");
 const inputRef = ref<HTMLInputElement | null>(null);
+const launchOnStartup = ref(false);
+
+onMounted(async () => {
+    try {
+        launchOnStartup.value = await invoke<boolean>("get_launch_on_startup");
+    } catch (err) {
+        console.error("Failed to load autostart setting:", err);
+    }
+});
+
+async function toggleLaunchOnStartup() {
+    const next = !launchOnStartup.value;
+    try {
+        await invoke("set_launch_on_startup", { enabled: next });
+        launchOnStartup.value = next;
+    } catch (err) {
+        console.error("Failed to update autostart setting:", err);
+    }
+}
 
 function showAdd() {
     addingGame.value = true;
@@ -55,14 +75,18 @@ function removeGame(game: string) {
 
             <div class="menu-body">
                 <div class="menu-group-title">General</div>
-                <button class="menu-item" type="button">
+                <button
+                    class="menu-item"
+                    type="button"
+                    @click="toggleLaunchOnStartup"
+                >
                     <div class="menu-item-label">
                         <span>Launch on startup</span>
                         <span class="menu-item-desc"
                             >Open TalkU when you log in</span
                         >
                     </div>
-                    <span class="toggle-pill"
+                    <span class="toggle-pill" :class="{ on: launchOnStartup }"
                         ><span class="toggle-pill-dot"></span
                     ></span>
                 </button>
@@ -282,19 +306,32 @@ function removeGame(game: string) {
     width: 30px;
     height: 17px;
     border-radius: 9999px;
-    background: #23a446;
+    background: #3f444b;
     flex-shrink: 0;
+    transition: background-color 0.18s ease;
+}
+
+.toggle-pill.on {
+    background: #23a446;
 }
 
 .toggle-pill-dot {
     position: absolute;
     top: 2px;
-    right: 2px;
+    left: 2px;
     width: 13px;
     height: 13px;
     border-radius: 50%;
     background: #fff;
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+    transition:
+        left 0.18s ease,
+        right 0.18s ease;
+}
+
+.toggle-pill.on .toggle-pill-dot {
+    left: auto;
+    right: 2px;
 }
 
 /* Scrollable box that lists the game executables being watched. */
