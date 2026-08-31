@@ -10,7 +10,14 @@ struct ClientKey<'a> {
     client_pub_key: &'a str,
     #[serde(rename = "apiKey")]
     api_key: &'a str,
+    #[serde(rename = "clientVersion")]
+    client_version: f32,
 }
+
+/// The client app version reported to the server. Keep this in sync with the
+/// app's shipped version (e.g. "2.4" => 2.4); the server rejects clients below
+/// `requiredVersion`.
+const CURRENT_APP_VERSION: f32 = 2.4;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ServerConfig {
@@ -27,6 +34,8 @@ pub struct ServerConfig {
     pub dns: String,
     #[serde(rename = "wstunnelRemotePort")]
     pub wstunnel_remote_port: String,
+    #[serde(rename = "configVersion", default)]
+    pub config_version: u64,
 }
 
 pub struct Keypair {
@@ -73,6 +82,7 @@ pub async fn get_config_from_server() -> Result<(ServerConfig, String), ConfigEr
     let client_key = ClientKey {
         client_pub_key: &public_key,
         api_key: "z~WXkukTav2^dodr5#9",
+        client_version: CURRENT_APP_VERSION,
     };
 
     let client = reqwest::Client::new();
@@ -90,6 +100,34 @@ pub async fn get_config_from_server() -> Result<(ServerConfig, String), ConfigEr
         .map_err(|e| ConfigError(e.to_string()))?;
 
     Ok((server_config, private_key))
+}
+
+/// Query the server for the current client-config version number. Returns the
+/// number, or `None` when the server can't be reached (so a transient network
+/// failure never blocks connecting with a cached config).
+pub async fn fetch_config_version() -> Result<u64, ConfigError> {
+    let client = reqwest::Client::new();
+    let response = client
+        .get(format!("{API_URL}config_version/"))
+        .send()
+        .await
+        .map_err(|e| ConfigError(e.to_string()))?;
+
+    if !response.status().is_success() {
+        return Err(ConfigError(format!("HTTP {}", response.status())));
+    }
+
+    #[derive(serde::Deserialize)]
+    struct VersionResponse {
+        config_version: u64,
+    }
+
+    let body: VersionResponse = response
+        .json()
+        .await
+        .map_err(|e| ConfigError(e.to_string()))?;
+
+    Ok(body.config_version)
 }
 
 /// A complete client configuration: the server-provided settings plus the
@@ -123,6 +161,7 @@ fn write_config(path: &std::path::Path, config: &Config) -> Result<(), ConfigErr
         "WstunnelRemotePort = {}\n",
         config.server.wstunnel_remote_port
     ));
+    s.push_str(&format!("ConfigVersion = {}\n", config.server.config_version));
     std::fs::write(path, s).map_err(|e| ConfigError(e.to_string()))
 }
 
@@ -171,6 +210,10 @@ pub fn load_config(path: &std::path::Path) -> Result<Config, ConfigError> {
             .map_err(|e| ConfigError(format!("invalid keepalive: {e}")))?,
         dns: need(&kv, "interface.dns")?.to_string(),
         wstunnel_remote_port: need(&kv, "extra.wstunnelremoteport")?.to_string(),
+        config_version: kv
+            .get("extra.configversion")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0),
     };
     let private_key = need(&kv, "interface.privatekey")?.to_string();
 
@@ -180,26 +223,80 @@ pub fn load_config(path: &std::path::Path) -> Result<Config, ConfigError> {
     })
 }
 
-/// Load the cached config from `path`. If it does not exist, fetch it from the
-/// server and write it to `path`.
-pub async fn load_or_fetch_config(path: &std::path::Path) -> Result<Config, ConfigError> {
+/// Load the cached config version from disk (0 when the file is missing or does
+/// not carry a version).
+fn cached_config_version(path: &std::path::Path) -> u64 {
     match load_config(path) {
-        Ok(config) => {
-            println!("Loaded config from {}", path.display());
-            Ok(config)
-        }
-        Err(_) => {
-            println!("Config not found, fetching from server");
-            let (server, private_key) = get_config_from_server().await?;
-            let config = Config {
-                server,
-                private_key,
-            };
-            if let Some(parent) = path.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            write_config(path, &config)?;
-            Ok(config)
-        }
+        Ok(config) => config.server.config_version,
+        Err(_) => 0,
     }
+}
+
+/// Check the server's config version against the locally cached one and, if the
+/// server reports a newer version (or there is no cached config at all), re-run
+/// `exchange_keys/` to fetch a fresh config and overwrite the cached file. This
+/// is what makes config changes on the server reach installed clients: bump
+/// `config_version` on the backend and the next connect picks the new config up.
+pub async fn ensure_config_up_to_date(path: &std::path::Path) -> Result<(), ConfigError> {
+    // If there is no usable cached config, just fetch a fresh one (stamping the
+    // current server version so we don't re-register on the next connect).
+    if load_config(path).is_err() {
+        let remote_version = match fetch_config_version().await {
+            Ok(v) => v,
+            Err(e) => {
+                println!("Could not fetch a config version ({e}); fetching config anyway");
+                0
+            }
+        };
+        let (server, private_key) = get_config_from_server().await?;
+        let mut server = server;
+        server.config_version = remote_version;
+        let config = Config {
+            server,
+            private_key,
+        };
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        write_config(path, &config)?;
+        println!("Fetched missing config from server");
+        return Ok(());
+    }
+
+    // Compare the cached version with the server's. Only refetch when the server
+    // is reachable AND reports a version newer than what we have cached. A
+    // transient network failure (fetch_config_version Err) leaves the cache
+    // untouched so we can still connect offline.
+    let remote_version = match fetch_config_version().await {
+        Ok(v) => v,
+        Err(e) => {
+            println!("Could not check config version (using cached): {e}");
+            return Ok(());
+        }
+    };
+
+    if remote_version > cached_config_version(path) {
+        println!(
+            "Server config version {remote_version} is newer than cached {}; refetching",
+            cached_config_version(path)
+        );
+        let (server, private_key) = get_config_from_server().await?;
+        let mut server = server;
+        server.config_version = remote_version;
+        let config = Config {
+            server,
+            private_key,
+        };
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        write_config(path, &config)?;
+    } else {
+        println!(
+            "Config is up to date (cached version {})",
+            cached_config_version(path)
+        );
+    }
+
+    Ok(())
 }

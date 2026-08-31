@@ -352,7 +352,9 @@ async fn check_config_and_connect() -> Result<(), String> {
     let config_path = helper_path("talkuwg.conf")
         .map_err(|_| "Could not find talkuwg config path".to_string())?;
 
-    let _config = config::load_or_fetch_config(&config_path)
+    // Compare the locally cached config version with the server's and, if the
+    // server has a newer config, refetch it before connecting.
+    config::ensure_config_up_to_date(&config_path)
         .await
         .map_err(|e| e.to_string())?;
 
