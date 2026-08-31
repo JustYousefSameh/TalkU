@@ -5,10 +5,13 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { info } from "@tauri-apps/plugin-log";
 import SettingsMenu from "./SettingsMenu.vue";
 import MonitorMenu from "./MonitorMenu.vue";
+import { useUnreachableScan } from "./composables/useUnreachableScan";
 
 const settingsOpen = ref(false);
 const monitorOpen = ref(false);
 const appbarRef = ref<HTMLDivElement | null>(null);
+
+const { scanning, start: startScan, dispose } = useUnreachableScan();
 
 // Minimize to tray when the close button is pressed
 async function handleClose() {
@@ -42,6 +45,7 @@ onMounted(() => {
 });
 onUnmounted(() => {
     document.removeEventListener("click", onDocumentClick);
+    dispose();
 });
 </script>
 
@@ -79,7 +83,12 @@ onUnmounted(() => {
         </div>
 
         <SettingsMenu :open="settingsOpen" @open-monitor="openMonitor" />
-        <MonitorMenu :open="monitorOpen" @close="monitorOpen = false" />
+        <MonitorMenu
+            :open="monitorOpen"
+            :scanning="scanning"
+            @close="monitorOpen = false"
+            @start-scan="startScan"
+        />
     </main>
 </template>
 

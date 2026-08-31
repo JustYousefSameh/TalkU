@@ -17,7 +17,7 @@ const props = withDefaults(
         cancelText: "Cancel",
         showCancel: true,
         open: true,
-    }
+    },
 );
 
 const emit = defineEmits<{
@@ -35,25 +35,42 @@ watch(
     () => props.open,
     (o) => {
         visible.value = o;
-    }
+    },
 );
 </script>
 
 <template>
     <Teleport to="body">
         <Transition name="popup">
-            <div v-if="visible" class="popup-overlay" @click.self="emit('cancel')">
+            <div
+                v-if="visible"
+                class="popup-overlay"
+                @click.self="emit('cancel')"
+            >
                 <div class="popup-box">
-                    <div class="popup-icon" :class="{ success: !isError }" aria-hidden="true">
+                    <div
+                        class="popup-icon"
+                        :class="{ success: !isError }"
+                        aria-hidden="true"
+                    >
                         {{ icon }}
                     </div>
                     <p v-if="title" class="popup-title">{{ title }}</p>
                     <p class="popup-message">{{ message }}</p>
                     <div class="popup-actions">
-                        <button v-if="showCancel" type="button" class="btn btn-cancel" @click="emit('cancel')">
+                        <button
+                            v-if="showCancel"
+                            type="button"
+                            class="btn btn-cancel"
+                            @click="emit('cancel')"
+                        >
                             {{ cancelText }}
                         </button>
-                        <button type="button" class="btn btn-confirm" @click="emit('confirm')">
+                        <button
+                            type="button"
+                            class="btn btn-confirm"
+                            @click="emit('confirm')"
+                        >
                             {{ confirmText }}
                         </button>
                     </div>
@@ -71,6 +88,7 @@ watch(
     align-items: center;
     justify-content: center;
     background: rgba(0, 0, 0, 0.55);
+    border-radius: 16px;
     z-index: 2000;
 }
 
@@ -149,7 +167,9 @@ watch(
     font-weight: 600;
     letter-spacing: 0.2px;
     cursor: pointer;
-    transition: transform 0.1s ease, background 0.2s ease;
+    transition:
+        transform 0.1s ease,
+        background 0.2s ease;
 }
 
 .btn:active {

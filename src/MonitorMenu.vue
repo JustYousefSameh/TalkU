@@ -2,14 +2,15 @@
 import { ref, watch, computed, onUnmounted } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { Monitor, Search, X, RefreshCw } from "lucide-vue-next";
-import ErrorBox from "./ErrorBox.vue";
 
 const props = defineProps<{
     open: boolean;
+    scanning: string | null;
 }>();
 
-defineEmits<{
+const emit = defineEmits<{
     close: [];
+    "start-scan": [name: string];
 }>();
 
 interface ProcessInfo {
@@ -24,9 +25,6 @@ const processes = ref<ProcessInfo[]>([]);
 const search = ref("");
 const loading = ref(false);
 const error = ref("");
-const scanning = ref<string | null>(null);
-const popupMessage = ref<string | null>(null);
-const popupVariant = ref<"error" | "success">("success");
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 
 const filteredProcesses = computed(() => {
@@ -47,19 +45,9 @@ async function refresh() {
     }
 }
 
-async function scan(name: string) {
-    if (scanning.value) return; // only one in-flight at a time
-    scanning.value = name;
-    try {
-        await invoke("collect_unreachable", { processName: name, seconds: 15 });
-        popupVariant.value = "success";
-        popupMessage.value = `Scan initiated for ${name}. Please reproduce the issue so we can capture the logs.`;
-    } catch (e) {
-        popupVariant.value = "error";
-        popupMessage.value = String(e);
-    } finally {
-        scanning.value = null;
-    }
+function startScan(name: string) {
+    if (props.scanning) return; // only one in-flight at a time
+    emit("start-scan", name);
 }
 
 watch(
@@ -73,8 +61,6 @@ watch(
             pollTimer = null;
         }
         if (!open) {
-            popupMessage.value = null;
-            scanning.value = null;
             search.value = "";
         }
     },
@@ -163,8 +149,8 @@ onUnmounted(() => {
                         role="button"
                         tabindex="0"
                         :title="'Run unreachable scan on ' + p.name"
-                        @click="scan(p.name)"
-                        @keydown.enter="scan(p.name)"
+                        @click="startScan(p.name)"
+                        @keydown.enter="startScan(p.name)"
                     >
                         <span class="proc-name">{{ p.name }}</span>
                         <span class="proc-pid">{{ p.pid }}</span>
@@ -174,15 +160,6 @@ onUnmounted(() => {
                     </div>
                 </div>
             </div>
-            <ErrorBox
-                :open="popupMessage !== null"
-                :message="popupMessage || ''"
-                :variant="popupVariant"
-                :show-cancel="false"
-                confirm-text="OK"
-                @confirm="popupMessage = null"
-                @cancel="popupMessage = null"
-            />
         </div>
     </Transition>
 </template>

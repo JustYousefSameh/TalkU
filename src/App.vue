@@ -7,17 +7,33 @@ import ActiveUsers from "./ActiveUsers.vue";
 import GradientBackgroundWithImage from "./GradientBackgroundWithImage.vue";
 import ConnectionTimer from "./ConnectionTimer.vue";
 import ErrorBox from "./ErrorBox.vue";
-import connectSound from "./assets/connect.mp3";
+import { useMessageBox } from "./stores/messageBox";
+import connectSound from "./assets/talku_connected.wav";
 import disconnectSound from "./assets/disconnect.mp3";
 import type { Status } from "./types";
 
 const status = ref<Status>("disconnected");
-const errorMessage = ref<string | null>(null);
 const sliderRef = ref<InstanceType<typeof CustomSliderButton> | null>(null);
+const {
+    message: boxMessage,
+    title: boxTitle,
+    variant: boxVariant,
+    confirmText: boxConfirmText,
+    showCancel: boxShowCancel,
+    show: boxShow,
+    hide: boxHide,
+    confirm: boxConfirm,
+} = useMessageBox();
 
-function onRetry() {
-    errorMessage.value = null;
-    sliderRef.value?.retryLastAction();
+function onSliderError(message: string) {
+    boxShow({
+        message,
+        title: "Connection failed",
+        variant: "error",
+        confirmText: "Retry",
+        showCancel: true,
+        onConfirm: () => sliderRef.value?.retryLastAction(),
+    });
 }
 
 let audio: HTMLAudioElement | null = null;
@@ -42,22 +58,25 @@ watch(status, (next, prev) => {
 
 <template>
     <main>
-        <div class="app-main"  data-tauri-drag-region="deep">
+        <div class="app-main" data-tauri-drag-region="deep">
             <GradientBackgroundWithImage :status="status" />
             <AppBar />
             <CustomSliderButton
                 ref="sliderRef"
                 v-model:status="status"
-                @error="errorMessage = $event"
+                @error="onSliderError"
             />
             <ConnectionTimer :status="status" />
             <ActiveUsers />
             <ErrorBox
-                :open="errorMessage !== null"
-                title="Connection failed"
-                :message="errorMessage || ''"
-                @confirm="onRetry"
-                @cancel="errorMessage = null"
+                :open="boxMessage !== null"
+                :title="boxTitle"
+                :message="boxMessage || ''"
+                :variant="boxVariant"
+                :confirm-text="boxConfirmText"
+                :show-cancel="boxShowCancel"
+                @confirm="boxConfirm()"
+                @cancel="boxHide()"
             />
             <div class="socials">
                 <SocialLink
