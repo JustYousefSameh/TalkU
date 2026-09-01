@@ -17,7 +17,7 @@ struct ClientKey<'a> {
 /// The client app version reported to the server. Keep this in sync with the
 /// app's shipped version (e.g. "2.4" => 2.4); the server rejects clients below
 /// `requiredVersion`.
-const CURRENT_APP_VERSION: f32 = 2.4;
+const CURRENT_APP_VERSION: f32 = 3.0;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ServerConfig {
@@ -71,6 +71,34 @@ impl From<ConfigError> for String {
     }
 }
 
+/// Build a human-readable error for a non-success HTTP response.
+///
+/// FastAPI/Starlette wrap HTTPException payloads in `{"detail": "..."}`, so
+/// when that field is a plain string we show it directly instead of dumping
+/// raw JSON into the UI (e.g. the old-client-version rejection on
+/// `exchange_keys/`). Rate limits (HTTP 429) get their own clear message since
+/// the server's rate-limit body isn't JSON.
+fn http_error_message(endpoint: &str, status: reqwest::StatusCode, body: &str) -> String {
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        return format!(
+            "Rate limited by the server on `{endpoint}` (HTTP 429). Please wait a moment and try again."
+        );
+    }
+    if !body.is_empty() {
+        #[derive(serde::Deserialize)]
+        struct ApiError {
+            detail: serde_json::Value,
+        }
+        if let Ok(parsed) = serde_json::from_str::<ApiError>(body) {
+            if let Some(text) = parsed.detail.as_str() {
+                return text.to_string();
+            }
+        }
+        return format!("Server returned HTTP {status} on `{endpoint}`: {body}");
+    }
+    format!("Server returned HTTP {status} on `{endpoint}`")
+}
+
 pub async fn get_config_from_server() -> Result<(ServerConfig, String), ConfigError> {
     // Generate public and private key
     let keypair = Keypair::generate();
@@ -94,10 +122,24 @@ pub async fn get_config_from_server() -> Result<(ServerConfig, String), ConfigEr
         .await
         .map_err(|e| ConfigError(e.to_string()))?;
 
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        return Err(ConfigError(http_error_message(
+            "exchange_keys",
+            status,
+            &body,
+        )));
+    }
+
     let server_config: ServerConfig = response
         .json()
         .await
-        .map_err(|e| ConfigError(e.to_string()))?;
+        .map_err(|e| {
+            ConfigError(format!(
+                "Failed to decode config from server (HTTP {status}): {e}"
+            ))
+        })?;
 
     Ok((server_config, private_key))
 }
@@ -114,7 +156,16 @@ pub async fn fetch_config_version() -> Result<u64, ConfigError> {
         .map_err(|e| ConfigError(e.to_string()))?;
 
     if !response.status().is_success() {
-        return Err(ConfigError(format!("HTTP {}", response.status())));
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .unwrap_or_default();
+        return Err(ConfigError(http_error_message(
+            "config_version",
+            status,
+            &body,
+        )));
     }
 
     #[derive(serde::Deserialize)]
@@ -161,7 +212,10 @@ fn write_config(path: &std::path::Path, config: &Config) -> Result<(), ConfigErr
         "WstunnelRemotePort = {}\n",
         config.server.wstunnel_remote_port
     ));
-    s.push_str(&format!("ConfigVersion = {}\n", config.server.config_version));
+    s.push_str(&format!(
+        "ConfigVersion = {}\n",
+        config.server.config_version
+    ));
     std::fs::write(path, s).map_err(|e| ConfigError(e.to_string()))
 }
 

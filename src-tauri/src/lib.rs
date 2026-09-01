@@ -401,80 +401,30 @@ const SYSTEM_PROCESS_NAMES: &[&str] = &[
     "audiodg.exe",
 ];
 
-/// List the processes currently visible to the app, sorted by name, for the
-/// Monitor menu. Two rules keep the list useful:
+/// List the processes currently visible to the app, for the Monitor menu.
 ///
-/// 1. System processes are hidden — anything in session 0, the kernel/system
-///    idle pseudo-processes, and known system executables by name.
-/// 2. Only the *root* of each process tree is shown: a process with no
-///    surviving parent, whose parent is a system process, or whose parent is
-///    Explorer (the desktop shell launching user apps) counts as a root.
-///    Everything spawned by another user process is hidden.
+/// System processes are filtered out (see `SYSTEM_PROCESS_NAMES`); everything
+/// else is shown, one row per PID, including child processes. Sorted by name.
 #[tauri::command]
 fn list_processes() -> Result<Vec<ProcessInfo>, String> {
-    use std::collections::HashMap;
     use sysinfo::System;
 
     let system = System::new_all();
 
-    let is_system: HashMap<sysinfo::Pid, bool> = system
+    let mut list: Vec<ProcessInfo> = system
         .processes()
         .iter()
-        .map(|(pid, p)| {
-            let sys = pid.as_u32() <= 4
-                || p.session_id().map_or(false, |s| s.as_u32() == 0)
-                || SYSTEM_PROCESS_NAMES
-                    .iter()
-                    .any(|n| p.name().eq_ignore_ascii_case(n));
-            (*pid, sys)
+        .map(|(pid, p)| ProcessInfo {
+            pid: pid.as_u32(),
+            name: p.name().to_string(),
+            count: 1,
+            cpu_percent: p.cpu_usage(),
+            memory_kb: p.memory() / 1024,
         })
-        .collect();
-
-    // Collapse multiple instances of the same executable into a single row and
-    // keep the lowest PID (plus the instance count).
-    let mut by_name: HashMap<String, (u32, u32, f32, u64)> = HashMap::new();
-    for (pid, p) in system.processes() {
-        if is_system.get(pid).copied().unwrap_or(true) {
-            continue;
-        }
-
-        let is_root = match p.parent() {
-            None => true, // orphaned / reparented to system -> treat as root
-            Some(pp) => {
-                if pp == *pid {
-                    true
-                } else if let Some(parent_proc) = system.processes().get(&pp) {
-                    // An app launched from Explorer is the root of its own tree.
-                    parent_proc.name().eq_ignore_ascii_case("explorer.exe")
-                        || is_system.get(&pp).copied().unwrap_or(true)
-                } else {
-                    true // parent already gone -> root
-                }
-            }
-        };
-        if !is_root {
-            continue;
-        }
-
-        let name = p.name().to_string();
-        let entry =
-            by_name
-                .entry(name)
-                .or_insert((pid.as_u32(), 0, p.cpu_usage(), p.memory() / 1024));
-        if pid.as_u32() < entry.0 {
-            entry.0 = pid.as_u32();
-        }
-        entry.1 += 1;
-    }
-
-    let mut list: Vec<ProcessInfo> = by_name
-        .into_iter()
-        .map(|(name, (pid, count, cpu_percent, memory_kb))| ProcessInfo {
-            pid,
-            name,
-            count,
-            cpu_percent,
-            memory_kb,
+        .filter(|p| {
+            !SYSTEM_PROCESS_NAMES
+                .iter()
+                .any(|n| p.name.eq_ignore_ascii_case(n))
         })
         .collect();
     list.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
@@ -622,6 +572,29 @@ fn get_monitored_games(settings: tauri::State<'_, SharedSettings>) -> Result<Vec
 }
 
 #[tauri::command]
+fn get_audio_cues(settings: tauri::State<'_, SharedSettings>) -> Result<bool, String> {
+    // Unset (None) means the user never touched the toggle -> cues are on.
+    Ok(settings
+        .lock()
+        .map(|s| s.audio_cues.unwrap_or(true))
+        .unwrap_or(true))
+}
+
+#[tauri::command]
+fn set_audio_cues(
+    enabled: bool,
+    app: tauri::AppHandle,
+    settings: tauri::State<'_, SharedSettings>,
+) -> Result<(), String> {
+    if let Ok(mut s) = settings.lock() {
+        s.audio_cues = Some(enabled);
+        let path = settings_path(&app)?;
+        s.save(&path);
+    }
+    Ok(())
+}
+
+#[tauri::command]
 fn add_monitored_game(
     name: String,
     app: tauri::AppHandle,
@@ -750,7 +723,9 @@ pub fn run() {
             set_auto_connect,
             get_monitored_games,
             add_monitored_game,
-            remove_monitored_game
+            remove_monitored_game,
+            get_audio_cues,
+            set_audio_cues
         ])
         .setup(|app| {
             if cfg!(target_os = "linux") {

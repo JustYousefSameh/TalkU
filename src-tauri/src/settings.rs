@@ -11,6 +11,8 @@ pub struct AppSettings {
     pub auto_connect_on_game: bool,
     #[serde(default)]
     pub monitored_games: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_cues: Option<bool>,
 }
 
 impl AppSettings {

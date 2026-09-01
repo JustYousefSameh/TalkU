@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { onMounted, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
-import { Settings, Gamepad2, Plus, Check, X, Trash2, Monitor } from "lucide-vue-next";
+import { Settings, Gamepad2, Plus, Check, X, Trash2 } from "lucide-vue-next";
+import { useAudioCues } from "./stores/audioCues";
 
 defineProps<{
     open: boolean;
@@ -18,6 +19,8 @@ const inputRef = ref<HTMLInputElement | null>(null);
 const launchOnStartup = ref(false);
 const autoConnect = ref(false);
 
+const { enabled: audioCues, load: loadAudioCues, set: setAudioCues } = useAudioCues();
+
 onMounted(async () => {
     try {
         launchOnStartup.value = await invoke<boolean>("get_launch_on_startup");
@@ -30,6 +33,7 @@ onMounted(async () => {
     } catch (err) {
         console.error("Failed to load game settings:", err);
     }
+    loadAudioCues();
 });
 
 async function toggleLaunchOnStartup() {
@@ -50,6 +54,10 @@ async function toggleAutoConnect() {
     } catch (err) {
         console.error("Failed to update auto-connect setting:", err);
     }
+}
+
+async function toggleAudioCues() {
+    await setAudioCues(!audioCues.value);
 }
 
 function showAdd() {
@@ -120,6 +128,24 @@ async function removeGame(game: string) {
                 <button
                     class="menu-item"
                     type="button"
+                    @click="toggleAudioCues"
+                >
+                    <div class="menu-item-label">
+                        <span>Audio cues</span>
+                        <span class="menu-item-desc"
+                            >Play a sound when the tunnel connects or
+                            disconnects</span
+                        >
+                    </div>
+                    <span class="toggle-pill" :class="{ on: audioCues }"
+                        ><span class="toggle-pill-dot"></span
+                    ></span>
+                </button>
+
+                <div class="menu-group-title">Games</div>
+                <button
+                    class="menu-item"
+                    type="button"
                     @click="toggleAutoConnect"
                 >
                     <div class="menu-item-label">
@@ -132,20 +158,7 @@ async function removeGame(game: string) {
                         ><span class="toggle-pill-dot"></span
                     ></span>
                 </button>
-
-                <div class="menu-group-title">Monitoring</div>
-                <button
-                    class="menu-btn-monitor"
-                    type="button"
-                    title="Open monitor"
-                    @click="$emit('open-monitor')"
-                >
-                    <Monitor class="h-4" />
-                    <span>Monitor</span>
-                </button>
-
-                <div class="menu-group-title">Monitored games</div>
-                <div class="games-box">
+                <div v-if="autoConnect" class="games-box">
                     <div
                         v-for="game in games"
                         :key="game"
@@ -199,7 +212,7 @@ async function removeGame(game: string) {
                         class="games-empty"
                     >
                         <Gamepad2 class="h-5 games-empty-icon" />
-                        <span>No games monitored yet</span>
+                        <span>No games added yet</span>
                     </div>
 
                     <div class="games-footer">
@@ -214,6 +227,21 @@ async function removeGame(game: string) {
                         </button>
                     </div>
                 </div>
+
+                <div class="menu-group-title">Troubleshooting</div>
+                <button
+                    class="menu-item"
+                    type="button"
+                    @click="$emit('open-monitor')"
+                >
+                    <div class="menu-item-label">
+                        <span>Troubleshoot connection</span>
+                        <span class="menu-item-desc"
+                            >Pick a process and send its logs to the server</span
+                        >
+                    </div>
+                    <span class="menu-item-value">Open</span>
+                </button>
             </div>
         </div>
     </Transition>
@@ -376,31 +404,6 @@ async function removeGame(game: string) {
     background: rgba(255, 255, 255, 0.02);
     scrollbar-width: thin;
     scrollbar-color: rgba(35, 164, 70, 0.5) transparent;
-}
-
-.menu-btn-monitor {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 7px;
-    width: calc(100% - 12px);
-    margin: 2px 6px 8px;
-    padding: 9px 12px;
-    border: 1px solid rgba(35, 164, 70, 0.4);
-    border-radius: 8px;
-    background: rgba(35, 164, 70, 0.1);
-    color: #23a446;
-    font-size: 12px;
-    font-weight: 500;
-    cursor: pointer;
-    transition:
-        background-color 0.14s ease,
-        border-color 0.14s ease;
-}
-
-.menu-btn-monitor:hover {
-    background: rgba(35, 164, 70, 0.18);
-    border-color: rgba(35, 164, 70, 0.6);
 }
 
 .games-box::-webkit-scrollbar {

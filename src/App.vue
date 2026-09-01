@@ -9,12 +9,14 @@ import GradientBackgroundWithImage from "./GradientBackgroundWithImage.vue";
 import ConnectionTimer from "./ConnectionTimer.vue";
 import ErrorBox from "./ErrorBox.vue";
 import { useMessageBox } from "./stores/messageBox";
+import { useAudioCues } from "./stores/audioCues";
 import connectSound from "./assets/talku_connected.wav";
-import disconnectSound from "./assets/disconnect.mp3";
+import disconnectSound from "./assets/talku_disconnected.wav";
 import type { Status } from "./types";
 
 const status = ref<Status>("disconnected");
 const sliderRef = ref<InstanceType<typeof CustomSliderButton> | null>(null);
+const { enabled: audioCues, load: loadAudioCues } = useAudioCues();
 const {
     message: boxMessage,
     title: boxTitle,
@@ -52,6 +54,7 @@ function playSound(src: string) {
 
 watch(status, (next, prev) => {
     if (prev === next) return;
+    if (!audioCues.value) return;
     if (next === "connected") playSound(connectSound);
     else if (next === "disconnected") playSound(disconnectSound);
 });
@@ -63,6 +66,7 @@ let unlistenConnect: (() => void) | null = null;
 let unlistenDisconnect: (() => void) | null = null;
 
 onMounted(async () => {
+    loadAudioCues();
     unlistenConnect = await listen("game-connect", () => {
         sliderRef.value?.autoAction("connect");
     });

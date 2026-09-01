@@ -143,7 +143,7 @@ onUnmounted(() => {
                 <div v-else class="procs-list">
                     <div
                         v-for="p in filteredProcesses"
-                        :key="p.name"
+                        :key="p.pid"
                         class="proc-row"
                         :class="{ disabled: scanning !== null }"
                         role="button"

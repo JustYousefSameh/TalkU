@@ -18,6 +18,11 @@ const DEFAULT_CONFIG: &str = "talkuwg.conf";
 /// peer endpoint points here.
 const TUNNEL_PORT: u16 = 51820;
 
+/// Fallback wstunnel server used only when the config has no `[Extra] RemoteIp`
+/// / `WstunnelRemotePort` to read the real values from.
+const DEFAULT_WSTUNNEL_HOST: &str = "57.131.34.226";
+const DEFAULT_WSTUNNEL_PORT: &str = "443";
+
 fn ifname() -> String {
     if cfg!(target_os = "linux") || cfg!(target_os = "freebsd") {
         "wg0".into()
@@ -35,6 +40,9 @@ struct Config {
     post_up: Option<String>,
     post_down: Option<String>,
     peers: Vec<PeerConfig>,
+    // wstunnel server from the [Extra] section (RemoteIp / WstunnelRemotePort).
+    remote_ip: Option<String>,
+    wstunnel_remote_port: Option<String>,
 }
 
 #[derive(Default)]
@@ -107,6 +115,13 @@ fn parse_config(path: &str) -> Result<Config, String> {
                     _ => {}
                 }
             }
+            "extra" => match key.as_str() {
+                "remoteip" => config.remote_ip = Some(value.to_string()),
+                "wstunnelremoteport" => {
+                    config.wstunnel_remote_port = Some(value.to_string())
+                }
+                _ => {}
+            },
             _ => {}
         }
     }
@@ -224,12 +239,18 @@ fn cleanup_stale_interface() {
     }
 }
 
-fn start_wstunnel() -> Result<std::process::Child, String> {
+fn start_wstunnel(cfg: &Config) -> Result<std::process::Child, String> {
+    let remote_host = cfg.remote_ip.as_deref().unwrap_or(DEFAULT_WSTUNNEL_HOST);
+    let remote_port = cfg
+        .wstunnel_remote_port
+        .as_deref()
+        .unwrap_or(DEFAULT_WSTUNNEL_PORT);
+
     let args = [
         "client",
         "-L",
         &format!("udp://{TUNNEL_PORT}:localhost:{TUNNEL_PORT}?timeout_sec=0"),
-        "wss://57.131.34.226:443",
+        &format!("wss://{remote_host}:{remote_port}"),
     ];
 
     let exe = exe_dir()?.join(if cfg!(target_os = "windows") {
@@ -300,6 +321,7 @@ impl Daemon {
     }
 
     fn up(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let cfg = load_config()?;
         if self.is_up() {
             log("up: already up");
             // The adapter is up. If the tunnel child died since then, restart it
@@ -307,7 +329,7 @@ impl Daemon {
             if let Some(child) = self.wstunnel.as_mut() {
                 if child.try_wait().ok().flatten().is_some() {
                     log("up: wstunnel died, restarting");
-                    let new_child = start_wstunnel().map_err(|e| {
+                    let new_child = start_wstunnel(&cfg).map_err(|e| {
                         let msg = format!("wstunnel restart failed: {e}");
                         log(&msg);
                         msg
@@ -348,7 +370,6 @@ impl Daemon {
         kill_stale_wstunnel();
         cleanup_stale_interface();
 
-        let cfg = load_config()?;
         let name = ifname();
 
         #[cfg(not(target_os = "macos"))]
@@ -367,7 +388,7 @@ impl Daemon {
         // we configure the WireGuard peer. Otherwise the first handshake
         // fires into an unbound port, fails, and WireGuard backs off
         // ~1s, 2s, 4s... which is what made connecting take ~5-6s.
-        match start_wstunnel() {
+        match start_wstunnel(&cfg) {
             Ok(child) => {
                 self.wstunnel = Some(child);
                 log(&format!("up: wstunnel started in {:?}", start.elapsed()));
@@ -677,9 +698,26 @@ fn send_unreachable_report(process_name: &str, ips: &[String]) -> Result<(), Str
         .send()
         .map_err(|e| format!("failed to send unreachable report: {e}"))?;
 
-    if !resp.status().is_success() {
-        let status = resp.status();
-        return Err(format!("unreachable report rejected: HTTP {status}"));
+    let status = resp.status();
+    if !status.is_success() {
+        // Read the body so we can surface the server's reason (rate-limit and
+        // other errors are not JSON, so decode them as text rather than guessing).
+        let body = resp.text().unwrap_or_default();
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            return Err(
+                "unreachable report rejected: rate limited by the server (HTTP 429). \
+                 Please wait a moment and try again."
+                    .to_string(),
+            );
+        }
+        let detail = if body.is_empty() {
+            String::new()
+        } else {
+            format!(": {body}")
+        };
+        return Err(format!(
+            "unreachable report rejected: HTTP {status}{detail}"
+        ));
     }
     Ok(())
 }

@@ -56,7 +56,7 @@ onUnmounted(() => {
         >
             <div class="flex-1">
                 <span class="app-title text-gray-300 pr-1 text-sm">TalkU</span>
-                <span class="text-gray-500 text-xs">V2.4</span>
+                <span class="text-gray-500 text-xs">V3.0</span>
             </div>
             <div class="flex flex-row gap-5 items-center relative">
                 <button
