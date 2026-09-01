@@ -44,6 +44,11 @@ let lastAction: Action = null;
 
 let busy = false;
 
+// Successive failed connection attempts. Three in a row most likely means a
+// stale talkuwg.conf, so on the third failure we force a fresh config from the
+// server instead of just retrying the same one. Reset on any success.
+let consecutiveFailures = 0;
+
 async function reconcileStatus(): Promise<Status> {
     try {
         const line = await invoke<string>("get_vpn_status");
@@ -74,13 +79,31 @@ async function connect() {
     try {
         await invoke("check_config_and_connect");
         const result = await pollUntilConnected();
+        consecutiveFailures = 0;
         emit("update:status", result);
     } catch (err) {
         if ((await reconcileStatus()) === "connected") {
+            consecutiveFailures = 0;
             emit("update:status", "connected");
         } else {
-            emit("error", String(err));
+            consecutiveFailures += 1;
+            info(`consecutiveFailures=${consecutiveFailures}`);
+
+            // Two strikes: likely a stale cached config. Delete it so the
+            // next connect fetches a fresh one from the server.
+            if (consecutiveFailures >= 2) {
+                consecutiveFailures = 0;
+                try {
+                    await invoke("delete_config");
+                } catch (retryErr) {
+                    emit("error", String(retryErr));
+                }
+            } else {
+                emit("error", String(err));
+            }
+
             emit("update:status", "disconnected");
+            await disconnect();
         }
     } finally {
         busy = false;
@@ -120,7 +143,10 @@ async function autoAction(action: "connect" | "disconnect") {
     if (action === "connect" && props.status === "connected") return; // already connected
     if (action === "disconnect" && props.status === "disconnected") return; // already disconnected
     lastAction = action;
-    emit("update:status", action === "disconnect" ? "disconnected" : "connecting");
+    emit(
+        "update:status",
+        action === "disconnect" ? "disconnected" : "connecting",
+    );
     if (action === "disconnect") await disconnect();
     else await connect();
 }
@@ -128,7 +154,7 @@ async function autoAction(action: "connect" | "disconnect") {
 defineExpose({ retryLastAction, autoAction });
 
 async function pollUntilConnected(): Promise<Status> {
-    const deadline = Date.now() + 30000;
+    const deadline = Date.now() + 5000;
     const startTime = Date.now();
     while (Date.now() < deadline) {
         try {

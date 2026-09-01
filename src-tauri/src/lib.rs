@@ -366,6 +366,17 @@ async fn check_config_and_connect() -> Result<(), String> {
     Ok(())
 }
 
+/// Delete the cached `talkuwg.conf` config file. Called by the UI when several
+/// successive connection attempts failed, on the theory that the cached config
+/// is stale. The next connect then fetches a brand-new config from the server
+/// (the `ensure_config_up_to_date` "missing config" path).
+#[tauri::command]
+fn delete_config() -> Result<(), String> {
+    let config_path = helper_path("talkuwg.conf")
+        .map_err(|_| "Could not find talkuwg config path".to_string())?;
+    config::delete_config_file(&config_path).map_err(|e| e.to_string())
+}
+
 #[derive(serde::Serialize)]
 struct ProcessInfo {
     pid: u32,
@@ -725,7 +736,8 @@ pub fn run() {
             add_monitored_game,
             remove_monitored_game,
             get_audio_cues,
-            set_audio_cues
+            set_audio_cues,
+            delete_config
         ])
         .setup(|app| {
             if cfg!(target_os = "linux") {

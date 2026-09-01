@@ -286,6 +286,26 @@ fn cached_config_version(path: &std::path::Path) -> u64 {
     }
 }
 
+/// Delete the cached config file. Used when several successive connection
+/// attempts failed: the cached `talkuwg.conf` is suspected to be stale (e.g.
+/// the server rotated the peer/address without bumping `config_version`, which
+/// the version-based check in `ensure_config_up_to_date` can't detect). Simply
+/// deleting the file makes the next connect hit `ensure_config_up_to_date`'s
+/// "missing config" path, which fetches a brand-new config from the server.
+pub fn delete_config_file(path: &std::path::Path) -> Result<(), ConfigError> {
+    match std::fs::remove_file(path) {
+        Ok(()) => {
+            println!("Deleted cached config at {path:?}");
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            println!("No cached config to delete at {path:?}");
+            Ok(())
+        }
+        Err(e) => Err(ConfigError(e.to_string())),
+    }
+}
+
 /// Check the server's config version against the locally cached one and, if the
 /// server reports a newer version (or there is no cached config at all), re-run
 /// `exchange_keys/` to fetch a fresh config and overwrite the cached file. This
