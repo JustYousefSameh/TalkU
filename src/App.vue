@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, watch, onMounted, onUnmounted } from "vue";
 import { listen } from "@tauri-apps/api/event";
+import { invoke } from "@tauri-apps/api/core";
 import AppBar from "./AppBar.vue";
 import CustomSliderButton from "./CustomSliderButton.vue";
 import SocialLink from "./SocialLink.vue";
@@ -59,14 +60,31 @@ watch(status, (next, prev) => {
     else if (next === "disconnected") playSound(disconnectSound);
 });
 
+// Mirror the VPN state into the tray icon: green logo while connected, red
+// logo while disconnected.
+async function syncTray(connected: boolean) {
+    try {
+        await invoke("set_tray_icon", { connected });
+    } catch (e) {
+        console.error("failed to set tray icon", e);
+    }
+}
+
+watch(status, (next) => syncTray(next === "connected"));
+
 // Auto-connect on game launch: the Rust game watcher emits events on the
 // rising/falling edge of a monitored game process, and we run the exact same
 // connect/disconnect flow as a button click so the UI updates.
 let unlistenConnect: (() => void) | null = null;
 let unlistenDisconnect: (() => void) | null = null;
 
+// Suppress the default webview context menu (copy/save image, etc.).
+const suppressContextMenu = (e: MouseEvent) => e.preventDefault();
+
 onMounted(async () => {
+    window.addEventListener("contextmenu", suppressContextMenu);
     loadAudioCues();
+    syncTray(status.value === "connected");
     unlistenConnect = await listen("game-connect", () => {
         sliderRef.value?.autoAction("connect");
     });
@@ -76,6 +94,7 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
+    window.removeEventListener("contextmenu", suppressContextMenu);
     unlistenConnect?.();
     unlistenDisconnect?.();
 });
