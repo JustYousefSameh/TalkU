@@ -467,6 +467,32 @@ async fn collect_unreachable(process_name: String, seconds: Option<u32>) -> Resu
 }
 
 const API_URL: &str = "https://talku.ddns.net:8000/";
+
+/// TalkU logo in green (#23a446): shown in the system tray when the tunnel is
+/// connected.
+const TRAY_ICON_GREEN: &[u8] = include_bytes!("../icons/32x32.png");
+/// Recolor of the same logo in red (#f44336): shown when disconnected.
+const TRAY_ICON_RED: &[u8] = include_bytes!("../icons/32x32-red.png");
+
+/// Swap the tray icon to match the VPN state: `connected=true` shows the
+/// original green logo, `false` shows the red variant. The frontend calls this
+/// whenever the connection status changes.
+#[tauri::command]
+fn set_tray_icon(app: tauri::AppHandle, connected: bool) -> Result<(), String> {
+    let tray = app
+        .tray_by_id("main")
+        .ok_or_else(|| "tray icon not found".to_string())?;
+    let bytes = if connected {
+        TRAY_ICON_GREEN
+    } else {
+        TRAY_ICON_RED
+    };
+    let icon = tauri::image::Image::from_bytes(bytes)
+        .map_err(|e| format!("failed to load tray icon: {e}"))?;
+    tray.set_icon(Some(icon))
+        .map_err(|e| format!("failed to set tray icon: {e}"))?;
+    Ok(())
+}
 #[derive(serde::Deserialize)]
 struct ConnectedUsersResponse {
     connected_users: i32,
@@ -737,7 +763,8 @@ pub fn run() {
             remove_monitored_game,
             get_audio_cues,
             set_audio_cues,
-            delete_config
+            delete_config,
+            set_tray_icon
         ])
         .setup(|app| {
             if cfg!(target_os = "linux") {

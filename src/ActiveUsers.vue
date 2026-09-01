@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onUnmounted } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import NumberFlow from "@number-flow/vue";
 import type { Status } from "./types";
 
 const props = defineProps<{
@@ -61,9 +62,11 @@ onUnmounted(() => {
     >
         <div class="dot"></div>
         <span class="text-gray-400 text-xs overflow-hidden leading-none">
-            <Transition name="count-flow" mode="out-in">
-                <span :key="shown" class="inline-block">{{ shown }}</span>
-            </Transition>
+            <NumberFlow
+                :value="shown"
+                :format="{ minimumIntegerDigits: 1 }"
+                class="numflow"
+            />
         </span>
     </main>
 </template>
@@ -94,22 +97,8 @@ onUnmounted(() => {
     box-shadow: 0 0 6px 1px rgba(74, 222, 128, 0.35);
 }
 
-.count-flow-enter-active {
-    transition: all 0.35s ease;
-}
-
-.count-flow-leave-active {
-    transition: all 0.25s ease;
-}
-
-.count-flow-leave-to {
-    opacity: 0;
-    transform: translateY(-14px);
-}
-
-.count-flow-enter-from {
-    opacity: 0;
-    transform: translateY(14px);
+.numflow {
+    display: inline-block;
 }
 
 /*Smooth glowing pulse animation*/
