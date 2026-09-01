@@ -59,15 +59,21 @@ async function reconcileStatus(): Promise<Status> {
     return "disconnected";
 }
 
-async function disconnect() {
-    if (busy) return;
-    busy = true;
+async function disconnectCore() {
     try {
         await invoke("disconnect_vpn");
         emit("update:status", "disconnected");
     } catch (err) {
         emit("error", String(err));
         emit("update:status", "connected");
+    }
+}
+
+async function disconnect() {
+    if (busy) return;
+    busy = true;
+    try {
+        await disconnectCore();
     } finally {
         busy = false;
     }
@@ -103,7 +109,11 @@ async function connect() {
             }
 
             emit("update:status", "disconnected");
-            await disconnect();
+            // Remove the adapter + wstunnel left over from the failed attempt
+            // (a stale config can leave the tunnel half-open). This calls the
+            // unguarded core: `disconnect()` would be a no-op here because
+            // we're still inside `connect()` and the `busy` guard is set.
+            await disconnectCore();
         }
     } finally {
         busy = false;
