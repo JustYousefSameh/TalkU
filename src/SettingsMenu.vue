@@ -12,10 +12,38 @@ defineEmits<{
     "open-monitor": [];
 }>();
 
-const games = ref<string[]>([]);
+interface SupportedGame {
+    id: string;
+    name: string;
+    process_names: string[];
+    steam_app_ids: number[];
+    epic_names: string[];
+    xbox_names: string[];
+}
+
+interface MonitoredGame {
+    name: string;
+    process_name: string;
+}
+
+interface GameInstallation {
+    found: boolean;
+    source: string;
+    install_dir: string | null;
+    executable: string | null;
+    process_name: string | null;
+}
+
+const games = ref<MonitoredGame[]>([]);
+const supportedGames = ref<SupportedGame[]>([]);
 const addingGame = ref(false);
-const newGame = ref("");
-const inputRef = ref<HTMLInputElement | null>(null);
+const selectedGameId = ref("");
+const customGameName = ref("");
+const customDisplayName = ref("");
+const detection = ref<GameInstallation | null>(null);
+const detecting = ref(false);
+let detectionRequestId = 0;
+const fileInput = ref<HTMLInputElement | null>(null);
 const launchOnStartup = ref(false);
 const autoConnect = ref(false);
 
@@ -29,7 +57,8 @@ onMounted(async () => {
     }
     try {
         autoConnect.value = await invoke<boolean>("get_auto_connect");
-        games.value = await invoke<string[]>("get_monitored_games");
+        games.value = await invoke<MonitoredGame[]>("get_monitored_games");
+        supportedGames.value = await invoke<SupportedGame[]>("get_supported_games");
     } catch (err) {
         console.error("Failed to load game settings:", err);
     }
@@ -61,34 +90,152 @@ async function toggleAudioCues() {
 }
 
 function showAdd() {
+    detectionRequestId++;
     addingGame.value = true;
-    newGame.value = "";
-    requestAnimationFrame(() => inputRef.value?.focus());
+    detection.value = null;
+    detecting.value = false;
+    customGameName.value = "";
+    customDisplayName.value = "";
+    selectedGameId.value = supportedGames.value[0]?.id ?? "";
+    if (selectedGameId.value) detectSelectedGame();
+}
+
+function onSelectedGameChange() {
+    if (selectedGameId.value === "__other__") {
+        detectionRequestId++;
+        detecting.value = false;
+        detection.value = null;
+        customGameName.value = "";
+        customDisplayName.value = "";
+        return;
+    }
+
+    customGameName.value = "";
+    customDisplayName.value = "";
+    detectSelectedGame();
+}
+
+async function detectSelectedGame() {
+    const requestId = ++detectionRequestId;
+    if (!selectedGameId.value || selectedGameId.value === "__other__") {
+        detecting.value = false;
+        return;
+    }
+    detecting.value = true;
+    detection.value = null;
+
+    try {
+        const result = await invoke<GameInstallation>("detect_game_installation", {
+            gameId: selectedGameId.value,
+        });
+        if (requestId !== detectionRequestId) return;
+        detection.value = result;
+    } catch (err) {
+        if (requestId !== detectionRequestId) return;
+        console.error("Failed to detect game:", err);
+        detection.value = {
+            found: false,
+            source: "Detection failed",
+            install_dir: null,
+            executable: null,
+            process_name: null,
+        };
+    } finally {
+        if (requestId === detectionRequestId) {
+            detecting.value = false;
+        }
+    }
+}
+
+function browseForGame() {
+    fileInput.value?.click();
+}
+
+function handleFileSelected(event: Event) {
+    const input = event.target as HTMLInputElement;
+    const file = input.files?.[0];
+    if (!file) return;
+    selectedGameId.value = "__other__";
+    const processName = file.name;
+    customGameName.value = processName;
+    if (!customDisplayName.value.trim()) {
+        customDisplayName.value = processName.replace(/\.exe$/i, "");
+    }
+    detection.value = {
+        found: true,
+        source: "Manual selection",
+        install_dir: null,
+        executable: processName,
+        process_name: processName,
+    };
+    input.value = "";
+}
+
+function handleManualProcessNameChange() {
+    const processName = customGameName.value.trim();
+
+    if (!processName) {
+        detection.value = null;
+        return;
+    }
+
+    detection.value = {
+        found: true,
+        source: "Manual entry",
+        install_dir: null,
+        executable: processName,
+        process_name: processName,
+    };
+    if (!customDisplayName.value.trim()) {
+        customDisplayName.value = processName.replace(/\.exe$/i, "");
+    }
 }
 
 async function confirmAdd() {
-    const game = newGame.value.trim();
-    if (game && !games.value.includes(game)) {
-        try {
-            await invoke("add_monitored_game", { name: game });
-            games.value.push(game);
-        } catch (err) {
-            console.error("Failed to add game:", err);
-        }
+    const processName = detection.value?.process_name?.trim();
+    if (
+        !processName ||
+        games.value.some(
+            (g) => g.process_name.toLowerCase() === processName.toLowerCase(),
+        )
+    ) {
+        return;
     }
-    addingGame.value = false;
-    newGame.value = "";
+
+    const selected = supportedGames.value.find((g) => g.id === selectedGameId.value);
+    const defaultCustomName = processName.replace(/\.exe$/i, "");
+    const displayName =
+        selectedGameId.value === "__other__"
+            ? customDisplayName.value.trim() || defaultCustomName
+            : selected?.name ?? processName;
+
+    try {
+        await invoke("add_monitored_game", { name: processName, displayName });
+        games.value.push({ name: displayName, process_name: processName });
+        addingGame.value = false;
+        selectedGameId.value = "";
+        customGameName.value = "";
+        customDisplayName.value = "";
+        detection.value = null;
+    } catch (err) {
+        console.error("Failed to add game:", err);
+    }
 }
 
 function cancelAdd() {
+    detectionRequestId++;
     addingGame.value = false;
-    newGame.value = "";
+    selectedGameId.value = "";
+    customGameName.value = "";
+    customDisplayName.value = "";
+    detection.value = null;
+    detecting.value = false;
 }
 
-async function removeGame(game: string) {
+async function removeGame(game: MonitoredGame) {
     try {
-        await invoke("remove_monitored_game", { name: game });
-        games.value = games.value.filter((g) => g !== game);
+        await invoke("remove_monitored_game", { name: game.process_name });
+        games.value = games.value.filter((g) => g.process_name !== game.process_name);
     } catch (err) {
         console.error("Failed to remove game:", err);
     }
@@ -161,13 +308,13 @@ async function removeGame(game: string) {
                 <div v-if="autoConnect" class="games-box">
                     <div
                         v-for="game in games"
-                        :key="game"
+                        :key="game.process_name"
                         class="game-row"
                     >
                         <span class="game-row-icon"
                             ><Gamepad2 class="h-3.5" /></span
                         >
-                        <span class="game-row-name">{{ game }}</span>
+                        <span class="game-row-name" :title="game.process_name">{{ game.name }}</span>
                         <span class="menu-item-value">On</span>
                         <button
                             class="game-row-remove"
@@ -179,32 +326,104 @@ async function removeGame(game: string) {
                         </button>
                     </div>
 
-                    <div v-if="addingGame" class="game-add-input-row">
+                    <div v-if="addingGame" class="game-add-panel">
                         <input
-                            ref="inputRef"
-                            v-model="newGame"
-                            class="game-add-input"
-                            type="text"
-                            placeholder="game.exe"
-                            @keydown.enter.prevent="confirmAdd"
-                            @keydown.esc.prevent="cancelAdd"
+                            ref="fileInput"
+                            type="file"
+                            accept=".exe"
+                            class="game-file-input"
+                            @change="handleFileSelected"
                         />
-                        <button
-                            class="game-add-confirm"
-                            type="button"
-                            title="Add"
-                            @click="confirmAdd"
+                        <select
+                            v-model="selectedGameId"
+                            class="game-add-select"
+                            @change="onSelectedGameChange"
                         >
-                            <Check class="h-4" />
-                        </button>
-                        <button
-                            class="game-add-cancel"
-                            type="button"
-                            title="Cancel"
-                            @click="cancelAdd"
-                        >
-                            <X class="h-4" />
-                        </button>
+                            <option
+                                v-for="game in supportedGames"
+                                :key="game.id"
+                                :value="game.id"
+                            >
+                                {{ game.name }}
+                            </option>
+                            <option value="__other__">Other — Enter process name or browse</option>
+                        </select>
+
+                        <div v-if="selectedGameId === '__other__'" class="game-custom-fields">
+                            <label class="game-custom-label" for="custom-game-name">
+                                Display name
+                            </label>
+                            <input
+                                id="custom-game-name"
+                                v-model="customDisplayName"
+                                class="game-custom-input"
+                                type="text"
+                                placeholder="Enter a friendly game name"
+                                maxlength="80"
+                            />
+                            <label class="game-custom-label" for="custom-game-process">
+                                Process name (use if Browse fails)
+                            </label>
+                            <input
+                                id="custom-game-process"
+                                v-model="customGameName"
+                                class="game-custom-input"
+                                type="text"
+                                placeholder="Enter process name (e.g. game.exe)"
+                                spellcheck="false"
+                                @input="handleManualProcessNameChange"
+                            />
+                        </div>
+
+                        <div class="game-detection">
+                            <div v-if="detecting" class="game-detection-status">
+                                Checking Steam, Epic Games and Xbox / Game Pass…
+                            </div>
+                            <template v-else-if="detection?.found">
+                                <div class="game-detection-status success">
+                                    <Check class="h-3.5" />
+                                    {{ detection.source }} detected
+                                </div>
+                                <div class="game-detection-path" :title="detection.executable ?? undefined">
+                                    {{ detection.executable }}
+                                </div>
+                            </template>
+                            <div v-else class="game-detection-status">
+                                {{
+                                    selectedGameId === "__other__"
+                                        ? "Enter the game process name or use Browse for EXE"
+                                        : detection?.source ?? "No installation detected"
+                                }}
+                            </div>
+                        </div>
+
+                        <div class="game-add-actions">
+                            <button
+                                class="game-browse-btn"
+                                type="button"
+                                @click="browseForGame"
+                            >
+                                Browse for EXE
+                            </button>
+                            <button
+                                class="game-add-confirm"
+                                type="button"
+                                title="Add"
+                                :disabled="!detection?.process_name"
+                                @click="confirmAdd"
+                            >
+                                <Check class="h-4" />
+                                Add
+                            </button>
+                            <button
+                                class="game-add-cancel"
+                                type="button"
+                                title="Cancel"
+                                @click="cancelAdd"
+                            >
+                                <X class="h-4" />
+                            </button>
+                        </div>
                     </div>
 
                     <div
@@ -508,6 +727,152 @@ async function removeGame(game: string) {
     border-top: 1px solid rgba(255, 255, 255, 0.05);
 }
 
+.game-file-input {
+    display: none;
+}
+
+.game-add-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 8px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.025);
+}
+
+.game-add-select {
+    width: 100%;
+    padding: 8px 10px;
+    border: 1px solid rgba(35, 164, 70, 0.55);
+    border-radius: 7px;
+    background: rgba(35, 164, 70, 0.16);
+    color: #eaffef;
+    font-weight: 500;
+    color-scheme: dark;
+    cursor: pointer;
+}
+
+.game-add-select:focus {
+    outline: none;
+    border-color: #23a446;
+    box-shadow: 0 0 0 2px rgba(35, 164, 70, 0.15);
+}
+
+.game-add-select option {
+    background: #151918;
+    color: #eaffef;
+}
+
+.game-custom-fields {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+}
+
+.game-custom-label {
+    color: #cbd5e1;
+    font-size: 10.5px;
+    font-weight: 600;
+}
+
+.game-custom-input {
+    width: 100%;
+    min-width: 0;
+    box-sizing: border-box;
+    padding: 7px 9px;
+    border: 1px solid rgba(96, 165, 250, 0.55);
+    border-radius: 7px;
+    background: rgba(37, 99, 235, 0.10);
+    color: #f3f4f6;
+    font-size: 11.5px;
+    font-family: "Roboto", sans-serif;
+}
+
+.game-custom-input::placeholder {
+    color: #9ca3af;
+}
+
+.game-custom-input:focus {
+    outline: none;
+    border-color: #60a5fa;
+    box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.16);
+}
+
+.game-custom-exe {
+    overflow: hidden;
+    color: #9ca3af;
+    font-size: 10px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.game-detection {
+    min-width: 0;
+}
+
+.game-detection-status {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 11px;
+    opacity: 0.95;
+    color: #d9e6dc;
+}
+
+.game-detection-status.success {
+    opacity: 1;
+    color: #7ee787;
+}
+
+.game-detection-path {
+    margin-top: 4px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 10px;
+    opacity: 0.85;
+    color: #b8c7bc;
+}
+
+.game-add-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.game-browse-btn {
+    flex: 1;
+    min-height: 30px;
+    padding: 6px 9px;
+    border: 1px solid rgba(96, 165, 250, 0.7);
+    border-radius: 7px;
+    background: #1d4ed8;
+    color: #ffffff;
+    font-size: 10.5px;
+    font-weight: 600;
+    cursor: pointer;
+    transition:
+        background-color 0.14s ease,
+        border-color 0.14s ease;
+}
+
+.game-browse-btn:hover {
+    background: #2563eb;
+    border-color: #93c5fd;
+}
+
+.game-add-confirm {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.game-add-confirm:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+}
+
 .game-add-input-row {
     display: flex;
     align-items: center;
@@ -538,8 +903,8 @@ async function removeGame(game: string) {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 26px;
-    height: 26px;
+    width: 30px;
+    height: 30px;
     border: 1px solid rgba(255, 255, 255, 0.1);
     border-radius: 6px;
     background: rgba(255, 255, 255, 0.04);
@@ -552,12 +917,20 @@ async function removeGame(game: string) {
 }
 
 .game-add-confirm {
-    color: #23a446;
+    border-color: #15803d;
+    background: #15803d;
+    color: #ffffff;
 }
 
-.game-add-confirm:hover {
-    background: rgba(35, 164, 70, 0.18);
-    border-color: rgba(35, 164, 70, 0.6);
+.game-add-confirm:hover:not(:disabled) {
+    border-color: #22c55e;
+    background: #16a34a;
+}
+
+.game-add-confirm:disabled {
+    border-color: rgba(255, 255, 255, 0.1);
+    background: rgba(255, 255, 255, 0.04);
+    color: #9ca3af;
 }
 
 .game-add-cancel:hover {

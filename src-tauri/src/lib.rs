@@ -1,7 +1,7 @@
 mod config;
 mod settings;
 
-use std::{fs, os::windows::process::CommandExt};
+use std::fs;
 
 use settings::SharedSettings;
 
@@ -361,7 +361,7 @@ async fn check_config_and_connect() -> Result<(), String> {
         .await
         .map_err(|e| e.to_string())?;
 
-    let _ = connect_vpn().await;
+    connect_vpn().await?;
 
     Ok(())
 }
@@ -497,7 +497,10 @@ fn set_tray_icon(app: tauri::AppHandle, connected: bool) -> Result<(), String> {
 struct ConnectedUsersResponse {
     connected_users: i32,
 }
-
+#[derive(serde::Deserialize)]
+struct CommunityFundStatusResponse {
+    status: String,
+}
 #[tauri::command]
 async fn get_connected_users_count() -> Result<i32, String> {
     let url = format!("{}connected_users/", API_URL);
@@ -511,6 +514,34 @@ async fn get_connected_users_count() -> Result<i32, String> {
         .map_err(|e| format!("Failed to parse response: {}", e))?;
 
     Ok(body.connected_users)
+}
+#[tauri::command]
+async fn get_community_fund_server_status() -> Result<String, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(4))
+        .build()
+        .map_err(|_| "Could not initialize status check".to_string())?;
+
+    let response = client
+        .get("https://talku-funds.pages.dev/api/server-status")
+        .send()
+        .await
+        .map_err(|_| "Status endpoint could not be reached".to_string())?;
+
+    if !response.status().is_success() {
+        return Ok("unavailable".to_string());
+    }
+
+    let body = response
+        .json::<CommunityFundStatusResponse>()
+        .await
+        .map_err(|_| "Invalid status response".to_string())?;
+
+    if body.status == "ok" {
+        Ok("online".to_string())
+    } else {
+        Ok("unavailable".to_string())
+    }
 }
 
 /// Registry value name under which the app registers itself for autostart.
@@ -600,29 +631,49 @@ fn set_auto_connect(
     Ok(())
 }
 
+#[derive(serde::Serialize, Clone)]
+struct MonitoredGame {
+    name: String,
+    process_name: String,
+}
+
 #[tauri::command]
-fn get_monitored_games(settings: tauri::State<'_, SharedSettings>) -> Result<Vec<String>, String> {
-    Ok(settings
-        .lock()
-        .map(|s| s.monitored_games.clone())
-        .unwrap_or_default())
+fn get_monitored_games(settings: tauri::State<'_, SharedSettings>) -> Result<Vec<MonitoredGame>, String> {
+    Ok(settings.lock().map(|s| {
+        s.monitored_games.iter().enumerate().map(|(i, process_name)| MonitoredGame {
+            process_name: process_name.clone(),
+            name: s.monitored_game_names.get(i).filter(|n| !n.trim().is_empty())
+                .cloned().unwrap_or_else(|| process_name.clone()),
+        }).collect()
+    }).unwrap_or_default())
+}
+
+#[derive(serde::Serialize, Clone)]
+struct SupportedGame {
+    id: String,
+    name: String,
+    process_names: Vec<String>,
+    steam_app_ids: Vec<u32>,
+    epic_names: Vec<String>,
+    xbox_names: Vec<String>,
+}
+
+#[derive(serde::Serialize)]
+struct GameInstallation {
+    found: bool,
+    source: String,
+    install_dir: Option<String>,
+    executable: Option<String>,
+    process_name: Option<String>,
 }
 
 #[tauri::command]
 fn get_audio_cues(settings: tauri::State<'_, SharedSettings>) -> Result<bool, String> {
-    // Unset (None) means the user never touched the toggle -> cues are on.
-    Ok(settings
-        .lock()
-        .map(|s| s.audio_cues.unwrap_or(true))
-        .unwrap_or(true))
+    Ok(settings.lock().map(|s| s.audio_cues.unwrap_or(true)).unwrap_or(true))
 }
 
 #[tauri::command]
-fn set_audio_cues(
-    enabled: bool,
-    app: tauri::AppHandle,
-    settings: tauri::State<'_, SharedSettings>,
-) -> Result<(), String> {
+fn set_audio_cues(enabled: bool, app: tauri::AppHandle, settings: tauri::State<'_, SharedSettings>) -> Result<(), String> {
     if let Ok(mut s) = settings.lock() {
         s.audio_cues = Some(enabled);
         let path = settings_path(&app)?;
@@ -632,19 +683,21 @@ fn set_audio_cues(
 }
 
 #[tauri::command]
-fn add_monitored_game(
-    name: String,
-    app: tauri::AppHandle,
-    settings: tauri::State<'_, SharedSettings>,
-) -> Result<(), String> {
+fn add_monitored_game(name: String, display_name: String, app: tauri::AppHandle, settings: tauri::State<'_, SharedSettings>) -> Result<(), String> {
     let name = name.trim();
-    if name.is_empty() {
-        return Err("game name is required".to_string());
-    }
+    let display_name = display_name.trim();
+    if name.is_empty() { return Err("game process name is required".into()); }
+    let display_name = if display_name.is_empty() { name } else { display_name };
     let normalized = settings::normalize_game(name);
     if let Ok(mut s) = settings.lock() {
+        while s.monitored_game_names.len() < s.monitored_games.len() {
+            let i = s.monitored_game_names.len();
+            let fallback_name = s.monitored_games[i].clone();
+            s.monitored_game_names.push(fallback_name);
+        }
         if !s.monitored_games.iter().any(|g| settings::normalize_game(g) == normalized) {
             s.monitored_games.push(name.to_string());
+            s.monitored_game_names.push(display_name.to_string());
         }
         let path = settings_path(&app)?;
         s.save(&path);
@@ -653,19 +706,91 @@ fn add_monitored_game(
 }
 
 #[tauri::command]
-fn remove_monitored_game(
-    name: String,
-    app: tauri::AppHandle,
-    settings: tauri::State<'_, SharedSettings>,
-) -> Result<(), String> {
+fn remove_monitored_game(name: String, app: tauri::AppHandle, settings: tauri::State<'_, SharedSettings>) -> Result<(), String> {
     let normalized = settings::normalize_game(&name);
     if let Ok(mut s) = settings.lock() {
-        s.monitored_games
-            .retain(|g| settings::normalize_game(g) != normalized);
-        let path = settings_path(&app)?;
-        s.save(&path);
+        let mut games=Vec::new(); let mut names=Vec::new();
+        for (i,game) in s.monitored_games.iter().enumerate() {
+            if settings::normalize_game(game)==normalized { continue; }
+            games.push(game.clone());
+            names.push(s.monitored_game_names.get(i).cloned().unwrap_or_else(|| game.clone()));
+        }
+        s.monitored_games=games; s.monitored_game_names=names;
+        let path=settings_path(&app)?; s.save(&path);
     }
     Ok(())
+}
+
+fn supported_games() -> Vec<SupportedGame> {
+    fn xbox(name:&str)->Vec<String>{vec![name.to_string()]}
+    vec![
+        SupportedGame{id:"helldivers2".into(),name:"Helldivers 2".into(),process_names:vec!["helldivers2.exe".into()],steam_app_ids:vec![553850],epic_names:vec![],xbox_names:xbox("Helldivers 2")},
+        SupportedGame{id:"gtav".into(),name:"GTA V".into(),process_names:vec!["GTA5.exe".into(),"GTA5_Enhanced.exe".into()],steam_app_ids:vec![271590,3240220],epic_names:vec!["Grand Theft Auto V".into(),"GTA V".into()],xbox_names:xbox("Grand Theft Auto V")},
+        SupportedGame{id:"fallout76".into(),name:"Fallout 76".into(),process_names:vec!["Fallout76.exe".into()],steam_app_ids:vec![1151340],epic_names:vec!["Fallout 76".into()],xbox_names:xbox("Fallout 76")},
+        SupportedGame{id:"valorant".into(),name:"Valorant".into(),process_names:vec!["VALORANT-Win64-Shipping.exe".into()],steam_app_ids:vec![],epic_names:vec![],xbox_names:vec![]},
+        SupportedGame{id:"overwatch2".into(),name:"Overwatch 2".into(),process_names:vec!["Overwatch.exe".into(),"Overwatch Launcher.exe".into()],steam_app_ids:vec![2357570],epic_names:vec!["Overwatch 2".into()],xbox_names:xbox("Overwatch 2")},
+        SupportedGame{id:"league".into(),name:"League Of Legends".into(),process_names:vec!["LeagueClient.exe".into(),"League of Legends.exe".into()],steam_app_ids:vec![],epic_names:vec![],xbox_names:vec![]},
+        SupportedGame{id:"foxhole".into(),name:"Foxhole".into(),process_names:vec!["FoxholeGame.exe".into()],steam_app_ids:vec![505460],epic_names:vec![],xbox_names:vec![]},
+        SupportedGame{id:"readyornot".into(),name:"Ready or Not".into(),process_names:vec!["ReadyOrNot-Win64-Shipping.exe".into()],steam_app_ids:vec![1144200],epic_names:vec!["Ready or Not".into()],xbox_names:vec![]},
+        SupportedGame{id:"huntshowdown".into(),name:"The Hunt: Showdown".into(),process_names:vec!["HuntGame.exe".into()],steam_app_ids:vec![594650],epic_names:vec![],xbox_names:vec![]},
+        SupportedGame{id:"thecyclefrontier".into(),name:"The Cycle: Frontier".into(),process_names:vec!["TheCycleFrontier.exe".into()],steam_app_ids:vec![868270],epic_names:vec![],xbox_names:vec![]},
+        SupportedGame{id:"pubg".into(),name:"PUBG (Steam)".into(),process_names:vec!["TslGame.exe".into()],steam_app_ids:vec![578080],epic_names:vec![],xbox_names:vec![]},
+        SupportedGame{id:"hellletloose".into(),name:"Hell Let Loose".into(),process_names:vec!["HLL-Win64-Shipping.exe".into()],steam_app_ids:vec![686810],epic_names:vec![],xbox_names:vec![]},
+        SupportedGame{id:"paladins".into(),name:"Paladins".into(),process_names:vec!["Paladins.exe".into()],steam_app_ids:vec![444090],epic_names:vec!["Paladins".into()],xbox_names:vec![]},
+        SupportedGame{id:"smite".into(),name:"Smite".into(),process_names:vec!["Smite.exe".into(),"SmiteEAC.exe".into()],steam_app_ids:vec![386360],epic_names:vec!["SMITE".into()],xbox_names:xbox("SMITE")},
+        SupportedGame{id:"outlasttrials".into(),name:"The Outlast Trials".into(),process_names:vec!["OPP-Win64-Shipping.exe".into()],steam_app_ids:vec![1304930],epic_names:vec!["The Outlast Trials".into()],xbox_names:xbox("The Outlast Trials")},
+    ]
+}
+
+#[tauri::command]
+fn get_supported_games()->Vec<SupportedGame>{supported_games()}
+
+#[cfg(windows)]
+fn steam_install_paths()->Vec<std::path::PathBuf>{
+    use winreg::{enums::HKEY_CURRENT_USER,RegKey}; let mut roots=Vec::new();
+    if let Ok(key)=RegKey::predef(HKEY_CURRENT_USER).open_subkey("Software\\Valve\\Steam"){
+        for n in ["InstallPath","SteamPath"]{if let Ok(v)=key.get_value::<String,_>(n){roots.push(std::path::PathBuf::from(v));}}
+    }
+    for env in ["ProgramFiles(x86)","ProgramFiles"]{if let Ok(base)=std::env::var(env){roots.push(std::path::PathBuf::from(base).join("Steam"));}}
+    roots.sort();roots.dedup();roots
+}
+#[cfg(not(windows))]
+fn steam_install_paths()->Vec<std::path::PathBuf>{Vec::new()}
+
+fn parse_vdf_path_line(line:&str)->Option<std::path::PathBuf>{
+    let t=line.trim();if !t.starts_with("\"path\""){return None;}let r=t.strip_prefix("\"path\"")?.trim_start().strip_prefix('"')?;let e=r.find('"')?;Some(std::path::PathBuf::from(r[..e].replace("\\\\","\\").replace("\\\"","\"")))
+}
+fn steam_library_paths()->Vec<std::path::PathBuf>{let mut v=Vec::new();for steam in steam_install_paths(){v.push(steam.clone());let f=steam.join("steamapps").join("libraryfolders.vdf");if let Ok(c)=fs::read_to_string(f){for line in c.lines(){if let Some(p)=parse_vdf_path_line(line){v.push(p);}}}}v.sort();v.dedup();v}
+
+fn find_executable(root:&std::path::Path,candidates:&[String])->Option<std::path::PathBuf>{
+    let wanted:Vec<String>=candidates.iter().map(|x|x.to_lowercase()).collect();let mut stack=vec![root.to_path_buf()];let mut visited=0usize;
+    while let Some(dir)=stack.pop(){if visited>10000{break;}visited+=1;let entries=match fs::read_dir(&dir){Ok(e)=>e,Err(_)=>continue};for entry in entries.flatten(){let path=entry.path();if path.is_dir(){let n=path.file_name().and_then(|x|x.to_str()).unwrap_or("").to_lowercase();if !matches!(n.as_str(),"logs"|"redist"|"windowsapps"|"program files"|"programdata"|"users"|"system volume information"|"$recycle.bin"|"wpsystem"){stack.push(path);}}else if let Some(n)=path.file_name().and_then(|x|x.to_str()){if wanted.iter().any(|w|w==&n.to_lowercase()){return Some(path);}}}}
+    None
+}
+
+#[cfg(windows)]
+fn epic_manifest_roots()->Vec<std::path::PathBuf>{match std::env::var("PROGRAMDATA"){Ok(v)=>vec![std::path::PathBuf::from(v).join("Epic").join("EpicGamesLauncher").join("Data").join("Manifests")],Err(_)=>Vec::new()}}
+#[cfg(not(windows))]
+fn epic_manifest_roots()->Vec<std::path::PathBuf>{Vec::new()}
+
+fn detect_epic_installation(game:&SupportedGame)->Option<GameInstallation>{
+    if game.epic_names.is_empty(){return None;}for root in epic_manifest_roots(){let entries=fs::read_dir(&root).ok()?;for entry in entries.flatten(){let path=entry.path();if path.extension().and_then(|x|x.to_str()).map(|x|x.eq_ignore_ascii_case("item"))!=Some(true){continue;}let content=fs::read_to_string(&path).ok()?;let m:serde_json::Value=serde_json::from_str(&content).ok()?;let display=m.get("DisplayName").or_else(||m.get("AppName")).and_then(|x|x.as_str()).unwrap_or("").to_lowercase();let launch=m.get("LaunchExecutable").and_then(|x|x.as_str()).unwrap_or("").to_lowercase();let match_name=game.epic_names.iter().any(|x|x.to_lowercase()==display);let match_exe=game.process_names.iter().any(|x|launch.ends_with(&x.to_lowercase()));if !match_name&&!match_exe{continue;}let install=std::path::PathBuf::from(m.get("InstallLocation").and_then(|x|x.as_str())?);if let Some(l)=m.get("LaunchExecutable").and_then(|x|x.as_str()){let exe = install.join(l.replace("/", "\\"));if exe.is_file(){let pn=exe.file_name().and_then(|x|x.to_str()).map(str::to_string);return Some(GameInstallation{found:true,source:"Epic Games".into(),install_dir:Some(install.display().to_string()),executable:Some(exe.display().to_string()),process_name:pn});}}if let Some(exe)=find_executable(&install,&game.process_names){let pn=exe.file_name().and_then(|x|x.to_str()).map(str::to_string);return Some(GameInstallation{found:true,source:"Epic Games".into(),install_dir:Some(install.display().to_string()),executable:Some(exe.display().to_string()),process_name:pn});}}}None
+}
+
+#[cfg(windows)]
+fn xbox_library_roots()->Vec<std::path::PathBuf>{
+    let mut roots=Vec::new();for letter in b'C'..=b'Z'{let drive=std::path::PathBuf::from(format!("{}:\\",letter as char));if !drive.join(".GamingRoot").is_file(){continue;}let default=drive.join("XboxGames");if default.is_dir(){roots.push(default);}if let Ok(entries)=fs::read_dir(&drive){for entry in entries.flatten(){let path=entry.path();if !path.is_dir()||path==drive.join("XboxGames"){continue;}let n=path.file_name().and_then(|x|x.to_str()).unwrap_or("").to_lowercase();if matches!(n.as_str(),"windows"|"windowsapps"|"program files"|"program files (x86)"|"programdata"|"users"|"system volume information"|"$recycle.bin"|"perflogs"|"recovery"|"wpsystem"){continue;}roots.push(path);}}}roots.sort();roots.dedup();roots
+}
+#[cfg(not(windows))]
+fn xbox_library_roots()->Vec<std::path::PathBuf>{Vec::new()}
+fn detect_xbox_installation(game:&SupportedGame)->Option<GameInstallation>{if game.xbox_names.is_empty(){return None;}for root in xbox_library_roots(){if let Some(exe)=find_executable(&root,&game.process_names){let pn=exe.file_name().and_then(|x|x.to_str()).map(str::to_string);return Some(GameInstallation{found:true,source:"Xbox / Game Pass".into(),install_dir:exe.parent().map(|x|x.display().to_string()),executable:Some(exe.display().to_string()),process_name:pn});}}None}
+
+#[tauri::command]
+fn detect_game_installation(game_id:String)->Result<GameInstallation,String>{
+    let game=supported_games().into_iter().find(|g|g.id==game_id).ok_or_else(||"unsupported game".to_string())?;
+    for library in steam_library_paths(){let steamapps=library.join("steamapps");for app_id in &game.steam_app_ids{let manifest=steamapps.join(format!("appmanifest_{app_id}.acf"));if !manifest.exists(){continue;}let content=fs::read_to_string(&manifest).map_err(|e|format!("failed to read Steam manifest: {e}"))?;let folder=content.lines().find_map(|line|{let t=line.trim();if t.starts_with("\"installdir\""){let r=t.strip_prefix("\"installdir\"")?.trim_start().strip_prefix('"')?;let e=r.find('"')?;Some(r[..e].replace("\\\\","\\").replace("\\\"","\""))}else{None}});if let Some(folder)=folder{let dir=steamapps.join("common").join(folder);if let Some(exe)=find_executable(&dir,&game.process_names){let pn=exe.file_name().and_then(|x|x.to_str()).map(str::to_string);return Ok(GameInstallation{found:true,source:"Steam".into(),install_dir:Some(dir.display().to_string()),executable:Some(exe.display().to_string()),process_name:pn});}}}}
+    if let Some(found)=detect_epic_installation(&game){return Ok(found);}if let Some(found)=detect_xbox_installation(&game){return Ok(found);}
+    let source=if game.steam_app_ids.is_empty()&&game.epic_names.is_empty()&&game.xbox_names.is_empty(){"Automatic detection not available"}else{"Installation not found"};Ok(GameInstallation{found:false,source:source.into(),install_dir:None,executable:None,process_name:None})
 }
 
 /// Long-running background task that watches for monitored game processes and
@@ -749,6 +874,7 @@ pub fn run() {
         )) as SharedSettings)
         .invoke_handler(tauri::generate_handler![
             get_connected_users_count,
+            get_community_fund_server_status,
             get_vpn_status,
             check_config_and_connect,
             disconnect_vpn,
@@ -759,6 +885,8 @@ pub fn run() {
             get_auto_connect,
             set_auto_connect,
             get_monitored_games,
+            get_supported_games,
+            detect_game_installation,
             add_monitored_game,
             remove_monitored_game,
             get_audio_cues,

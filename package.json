@@ -1,7 +1,7 @@
 {
   "name": "talku",
   "private": true,
-  "version": "0.1.0",
+  "version": "3.1.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -25,5 +25,8 @@
     "vite": "^6.0.3",
     "vue-tsc": "^2.1.10",
     "@tauri-apps/cli": "^2"
+  },
+  "allowScripts": {
+    "esbuild@0.25.12": true
   }
 }
