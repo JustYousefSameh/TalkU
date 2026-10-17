@@ -1,17 +1,29 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from "vue";
-import { Settings, Minus, X } from "lucide-vue-next";
+import { Settings, Minus, X, Download } from "lucide-vue-next";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { info } from "@tauri-apps/plugin-log";
 import SettingsMenu from "./SettingsMenu.vue";
 import MonitorMenu from "./MonitorMenu.vue";
 import { useUnreachableScan } from "./composables/useUnreachableScan";
+import { useUpdateCheck } from "./composables/useUpdateCheck";
+import UpdateDialog from "./UpdateDialog.vue";
 
 const settingsOpen = ref(false);
 const monitorOpen = ref(false);
 const appbarRef = ref<HTMLDivElement | null>(null);
 
 const { scanning, start: startScan, dispose } = useUnreachableScan();
+const {
+    newVersion,
+    step: updateStep,
+    progress,
+    speed,
+    error: updateError,
+    promptUpdate,
+    closeDialog,
+    install,
+} = useUpdateCheck();
 
 // Minimize to tray when the close button is pressed
 async function handleClose() {
@@ -54,9 +66,21 @@ onUnmounted(() => {
         <div
             class="flex flex-row justify-between items-center w-full pt-2 pl-3 pr-4 appbar-slide"
         >
-            <div class="flex-1">
+            <div class="flex-1 flex flex-row items-baseline">
                 <span class="app-title text-gray-300 pr-1 text-sm">TalkU</span>
                 <span class="text-gray-500 text-xs">V3.0</span>
+                <!-- Small green "new version" pill, only shown when GitHub
+                     has a release newer than this build. -->
+                <button
+                    v-if="newVersion"
+                    class="update-btn"
+                    type="button"
+                    :title="`Update to TalkU V${newVersion}`"
+                    @click="promptUpdate"
+                >
+                    <Download class="h-3" />
+                    V{{ newVersion }}
+                </button>
             </div>
             <div class="flex flex-row gap-5 items-center relative">
                 <button
@@ -88,6 +112,16 @@ onUnmounted(() => {
             :scanning="scanning"
             @close="monitorOpen = false"
             @start-scan="startScan"
+        />
+        <UpdateDialog
+            v-if="newVersion"
+            :step="updateStep"
+            :version="newVersion"
+            :progress="progress"
+            :speed="speed"
+            :error="updateError"
+            @update="install"
+            @close="closeDialog"
         />
     </main>
 </template>
@@ -135,5 +169,29 @@ onUnmounted(() => {
 .settings-btn.active {
     color: #23a446;
     transform: rotate(45deg);
+}
+
+.update-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    margin-left: 8px;
+    padding: 2px 8px 2px 4px;
+    border: 1px solid rgba(35, 164, 70, 0.55);
+    border-radius: 999px;
+    background: rgba(35, 164, 70, 0.16);
+    color: #7ee787;
+    font-family: "Roboto", sans-serif;
+    font-size: 11px;
+    line-height: 1.4;
+    cursor: pointer;
+    transition:
+        background 0.2s ease,
+        border-color 0.2s ease;
+}
+
+.update-btn:hover {
+    background: rgba(35, 164, 70, 0.28);
+    border-color: #23a446;
 }
 </style>

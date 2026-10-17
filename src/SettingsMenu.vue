@@ -3,6 +3,7 @@ import { onMounted, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { Settings, Gamepad2, Plus, Check, X, Trash2 } from "lucide-vue-next";
 import { useAudioCues } from "./stores/audioCues";
+import { LATEST_RELEASE_URL } from "./composables/useUpdateCheck";
 
 defineProps<{
     open: boolean;
@@ -93,6 +94,12 @@ async function removeGame(game: string) {
         console.error("Failed to remove game:", err);
     }
 }
+
+// Always available, so people can grab the newest build even if they missed
+// the update popup.
+function openLatestRelease() {
+    invoke("plugin:opener|open_url", { url: LATEST_RELEASE_URL });
+}
 </script>
 
 <template>
@@ -140,6 +147,19 @@ async function removeGame(game: string) {
                     <span class="toggle-pill" :class="{ on: audioCues }"
                         ><span class="toggle-pill-dot"></span
                     ></span>
+                </button>
+                <button
+                    class="menu-item"
+                    type="button"
+                    @click="openLatestRelease"
+                >
+                    <div class="menu-item-label">
+                        <span>Latest release</span>
+                        <span class="menu-item-desc"
+                            >Download the newest TalkU from GitHub</span
+                        >
+                    </div>
+                    <span class="menu-item-value">Open</span>
                 </button>
 
                 <div class="menu-group-title">Games</div>

@@ -22,6 +22,11 @@ TalkU is designed to bypass VOIP restrictions without ruining your in-game ping.
 2. Extract the file and run the installer.
 3. Connect and just enjoy your game!
 
+### Updating
+TalkU checks for a new version every time it starts. When one is out, click **Update** and TalkU downloads and runs the new installer for you. You can also open the latest release anytime from **Settings → Latest release**.
+
+> **For maintainers:** the updater expects each release to be tagged like `v3.1` and to include the installer as `TalkU.exe`.
+
 ## Supported Games
 TalkU integrates smoothly with games utilizing Vivox and other major voice engines. [View the full Vivox integration list here](https://en.wikipedia.org/wiki/Vivox#Integrations).
 

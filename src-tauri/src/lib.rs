@@ -1,5 +1,6 @@
 mod config;
 mod settings;
+mod update;
 
 use std::{fs, os::windows::process::CommandExt};
 
@@ -764,7 +765,9 @@ pub fn run() {
             get_audio_cues,
             set_audio_cues,
             delete_config,
-            set_tray_icon
+            set_tray_icon,
+            update::check_for_update,
+            update::install_update
         ])
         .setup(|app| {
             if cfg!(target_os = "linux") {
