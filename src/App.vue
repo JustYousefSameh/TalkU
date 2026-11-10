@@ -11,8 +11,6 @@ import ConnectionTimer from "./ConnectionTimer.vue";
 import ErrorBox from "./ErrorBox.vue";
 import { useMessageBox } from "./stores/messageBox";
 import { useAudioCues } from "./stores/audioCues";
-import connectSound from "./assets/talku_connected.wav";
-import disconnectSound from "./assets/talku_disconnected.wav";
 import type { Status } from "./types";
 
 const status = ref<Status>("disconnected");
@@ -40,28 +38,28 @@ function onSliderError(message: string) {
     });
 }
 
-let audio: HTMLAudioElement | null = null;
-
-function playSound(src: string) {
+async function playSound(soundType: "connected" | "disconnected") {
     try {
-        if (audio) {
-            audio.pause();
-            audio.currentTime = 0;
-        }
-        audio = new Audio(src);
-        audio.play().catch(() => {});
-    } catch {}
+        // Optional: stop currently playing audio before starting new cue
+        await invoke("stop_audio");
+
+        // Pass 'soundName' matching the Rust parameter name
+        await invoke("play_audio", {
+            soundName: soundType,
+        });
+    } catch (e) {
+        console.error("Failed to play audio cue via Rust:", e);
+    }
 }
 
 watch(status, (next, prev) => {
     if (prev === next) return;
     if (!audioCues.value) return;
-    if (next === "connected") playSound(connectSound);
-    else if (next === "disconnected") playSound(disconnectSound);
+    if (next === "connected") playSound("connected");
+    else if (next === "disconnected") playSound("disconnected");
 });
 
-// Mirror the VPN state into the tray icon: green logo while connected, red
-// logo while disconnected.
+// Mirror the VPN state into the tray icon
 async function syncTray(connected: boolean) {
     try {
         await invoke("set_tray_icon", { connected });
@@ -72,13 +70,9 @@ async function syncTray(connected: boolean) {
 
 watch(status, (next) => syncTray(next === "connected"));
 
-// Auto-connect on game launch: the Rust game watcher emits events on the
-// rising/falling edge of a monitored game process, and we run the exact same
-// connect/disconnect flow as a button click so the UI updates.
 let unlistenConnect: (() => void) | null = null;
 let unlistenDisconnect: (() => void) | null = null;
 
-// Suppress the default webview context menu (copy/save image, etc.).
 const suppressContextMenu = (e: MouseEvent) => e.preventDefault();
 
 onMounted(async () => {

@@ -1,7 +1,8 @@
+mod audio;
 mod config;
 mod settings;
 
-use std::{fs, os::windows::process::CommandExt};
+use audio::{play_audio, stop_audio, AudioPlayer};
 
 use settings::SharedSettings;
 
@@ -17,14 +18,29 @@ fn helper_path(file_name: &str) -> Result<std::path::PathBuf, String> {
     let path = current_exe
         .parent()
         .ok_or_else(|| "Current exe has no parent directory".to_string())?
-        .join(if cfg!(target_os = "windows") {
-            file_name
-        } else {
-            file_name
-        });
+        .join(file_name);
     Ok(path)
 }
 
+/// Path to the cached WireGuard config shared with the daemon. Windows keeps it
+/// next to the installed binaries; on Unix the daemon runs as root and the app
+/// as the desktop user, so it lives in root-owned shared state. `TALKU_CONFIG`
+/// overrides the default for development and must match talku-cli's resolver.
+fn vpn_config_path() -> Result<std::path::PathBuf, String> {
+    if let Some(path) = std::env::var_os("TALKU_CONFIG") {
+        return Ok(std::path::PathBuf::from(path));
+    }
+    #[cfg(unix)]
+    {
+        Ok(std::path::PathBuf::from("/var/lib/talku/talkuwg.conf"))
+    }
+    #[cfg(windows)]
+    {
+        helper_path("talkuwg.conf")
+    }
+}
+
+#[cfg(windows)]
 fn elevate_in_background(command: &str) {
     let helper = match helper_path("talku-cli.exe") {
         Ok(p) => p,
@@ -54,6 +70,7 @@ fn elevate_in_background(command: &str) {
 /// way to start a service without it unless the process is already elevated.
 /// Returns true once the elevated start has been launched (the caller then
 /// polls the named pipe until the service is reachable).
+#[cfg(windows)]
 fn start_service() -> bool {
     elevate_in_background("service-start");
     true
@@ -62,6 +79,7 @@ fn start_service() -> bool {
 /// Is the TalkUCLI service registered with the SCM? Uses the `windows-service`
 /// crate directly (no `sc` subprocess). Querying/open is permitted for the
 /// interactive (non-elevated) user, so no elevation is needed.
+#[cfg(windows)]
 fn is_service_registered() -> bool {
     use windows_service::service::ServiceAccess;
     use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
@@ -78,6 +96,7 @@ fn is_service_registered() -> bool {
 
 /// Is the TalkUCLI service registered AND currently running? Used to avoid
 /// needlessly re-starting an already-running service.
+#[cfg(windows)]
 fn is_service_running() -> bool {
     use windows_service::service::ServiceAccess;
     use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
@@ -105,40 +124,73 @@ fn is_service_running() -> bool {
     }
 }
 
-/// Named pipe the TalkUCLI service listens on (see talku-cli/src/main.rs).
-const PIPE_NAME: &str = r"\\.\pipe\TalkUCLI";
 /// Windows service name for the elevated daemon (see talku-cli/src/main.rs and
 /// src-tauri/windows/hooks.nsh).
+#[cfg(windows)]
 const SERVICE_NAME: &str = "TalkUCLI";
 
-/// Open a connection to the TalkUCLI named pipe for reading and writing. The
-/// pipe is created by the SYSTEM service with a DACL that allows the
-/// interactive user to connect, so this works from the normal (non-elevated)
-/// app.
-async fn open_pipe() -> Result<tokio::net::windows::named_pipe::NamedPipeClient, String> {
-    use tokio::net::windows::named_pipe::ClientOptions;
-    match ClientOptions::new().open(PIPE_NAME) {
-        Ok(client) => Ok(client),
-        Err(e) => {
-            println!("Failed to open named pipe {PIPE_NAME}: {e}");
-            Err(format!("Failed to open named pipe {PIPE_NAME}: {e}"))
-        }
-    }
+#[cfg(unix)]
+const DEFAULT_SOCKET_PATH: &str = "/run/talku/talku-cli.sock";
+
+/// Filesystem path of the Unix-domain socket. Must match the resolver in
+/// talku-cli/src/main.rs; `TALKU_SOCKET` overrides it for development.
+#[cfg(unix)]
+fn socket_path() -> std::path::PathBuf {
+    std::env::var_os("TALKU_SOCKET")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(DEFAULT_SOCKET_PATH))
 }
 
-/// Persistent named-pipe connection, opened lazily on first use and reused for
-/// every real command (websocket-style). Guarded by a tokio mutex so only one
-/// request is in flight at a time; the guard is Send-safe across awaits.
+/// Open a connection to the TalkUCLI daemon for reading and writing.
+///
+/// On Windows this is the named pipe created by the SYSTEM service with a DACL
+/// that allows the interactive user to connect, so it works from the normal
+/// (non-elevated) app. On Unix it is the daemon's Unix-domain socket.
+#[cfg(unix)]
+async fn open_pipe() -> Result<interprocess::local_socket::tokio::Stream, String> {
+    use interprocess::local_socket::{
+        tokio::{prelude::*, Stream},
+        GenericFilePath, ToFsName,
+    };
+
+    let path = socket_path();
+    let display = path.display().to_string();
+    let name = path
+        .to_fs_name::<GenericFilePath>()
+        .map_err(|e| format!("Invalid socket path {display}: {e}"))?;
+    Stream::connect(name)
+        .await
+        .map_err(|e| format!("Failed to connect to {display}: {e}"))
+}
+
+#[cfg(windows)]
+async fn open_pipe() -> Result<interprocess::local_socket::tokio::Stream, String> {
+    use interprocess::local_socket::{
+        tokio::{prelude::*, Stream},
+        GenericNamespaced, ToNsName,
+    };
+
+    let name = "TalkUCLI"
+        .to_ns_name::<GenericNamespaced>()
+        .map_err(|e| format!("Invalid pipe name: {e}"))?;
+    Stream::connect(name)
+        .await
+        .map_err(|e| format!("Failed to connect to \\\\.\\pipe\\TalkUCLI: {e}"))
+}
+
+/// Persistent connection, opened lazily on first use and reused for every real
+/// command (websocket-style). Guarded by a tokio mutex so only one request is in
+/// flight at a time; the guard is Send-safe across awaits.
 static PIPE_CONN: std::sync::OnceLock<
-    tokio::sync::Mutex<Option<tokio::net::windows::named_pipe::NamedPipeClient>>,
+    tokio::sync::Mutex<Option<interprocess::local_socket::tokio::Stream>>,
 > = std::sync::OnceLock::new();
 
-/// Read a single newline-terminated line directly from a named-pipe client,
-/// chunk-by-chunk, stopping at the first `\n`. Mirrors `read_pipe_command` on
-/// the daemon side and can be interleaved with writes on the same persistent
+/// Read a single newline-terminated line directly from the daemon connection,
+/// chunk-by-chunk, stopping at the first `\n`. Mirrors `read_command` on the
+/// daemon side and can be interleaved with writes on the same persistent
 /// connection.
 async fn read_pipe_line(
-    stream: &mut tokio::net::windows::named_pipe::NamedPipeClient,
+    stream: &mut interprocess::local_socket::tokio::Stream,
     timeout_ms: u64,
 ) -> Result<String, String> {
     use tokio::io::AsyncReadExt;
@@ -171,9 +223,8 @@ async fn read_pipe_line(
         .map_err(|e| format!("Invalid response encoding: {e}"))
 }
 
-/// Send one request over the named pipe and return the single-line reply. Each
-/// call opens a fresh connection, sends `cmd\n`, and reads one line back, then
-/// closes. Used only for the lightweight liveness `ping` probe.
+/// Send one request over a fresh connection and return the single-line reply.
+/// Used only for the lightweight liveness `ping` probe.
 async fn pipe_transact(cmd: &str, timeout_ms: u64) -> Result<String, String> {
     println!("  pipe_transact: {cmd}");
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -205,10 +256,11 @@ async fn pipe_transact(cmd: &str, timeout_ms: u64) -> Result<String, String> {
     Ok(line.trim().to_string())
 }
 
-/// Whether the TalkUCLI daemon is reachable. Opens the named pipe and expects a
+/// Whether the TalkUCLI daemon is reachable. Opens the endpoint and expects a
 /// `pong` reply to a `ping` probe. Never starts the service or elevates.
-async fn is_daemon_alive() -> bool {
-    matches!(pipe_transact("ping", 2000).await.as_deref(), Ok("pong"))
+async fn is_daemon_alive() -> Result<(), String> {
+    pipe_transact("ping", 2000).await?;
+    Ok(())
 }
 
 /// Make sure the elevated daemon (TalkUCLI service) is running. If the service
@@ -217,6 +269,7 @@ async fn is_daemon_alive() -> bool {
 /// If no service is registered (dev shell), fall back to a one-time direct
 /// elevation. Either way we then poll the named pipe until the daemon answers
 /// `pong`.
+#[cfg(windows)]
 async fn ensure_daemon() -> Result<(), String> {
     if is_daemon_alive().await {
         return Ok(());
@@ -258,13 +311,21 @@ async fn ensure_daemon() -> Result<(), String> {
     Err("Failed to start the TalkUCLI service".to_string())
 }
 
+/// On Unix there is no service-manager integration yet: systemd owns the
+/// daemon lifecycle, so a missing daemon is a configuration error rather than
+/// something the non-elevated app can fix by elevating.
+#[cfg(unix)]
+async fn ensure_daemon() -> Result<(), String> {
+    is_daemon_alive().await
+}
+
 async fn send_command(cmd: &str) -> Result<String, String> {
     ensure_daemon().await?;
     send_command_impl(cmd).await
 }
 
-/// Send a command over the persistent named-pipe connection, waiting up to
-/// `timeout_ms` for the reply.
+/// Send a command over the persistent connection, waiting up to `timeout_ms`
+/// for the reply.
 async fn send_command_impl_timeout(cmd: &str, timeout_ms: u64) -> Result<String, String> {
     use tokio::io::AsyncWriteExt;
     use tokio::time::{timeout, Duration};
@@ -280,9 +341,12 @@ async fn send_command_impl_timeout(cmd: &str, timeout_ms: u64) -> Result<String,
     let stream = guard.as_mut().expect("connection just ensured");
     let req = format!("{cmd}\n");
 
-    if let Err(e) = timeout(Duration::from_millis(timeout_ms), stream.write_all(req.as_bytes()))
-        .await
-        .map_err(|_| format!("Timed out sending command {cmd}"))?
+    if let Err(e) = timeout(
+        Duration::from_millis(timeout_ms),
+        stream.write_all(req.as_bytes()),
+    )
+    .await
+    .map_err(|_| format!("Timed out sending command {cmd}"))?
     {
         // Connection is bad; drop it so the next call reopens.
         *guard = None;
@@ -299,9 +363,9 @@ async fn send_command_impl_timeout(cmd: &str, timeout_ms: u64) -> Result<String,
     }
 }
 
-/// Send a command over the persistent named-pipe connection with a 10s default
-/// reply timeout. Used for best-effort work (like disconnect-on-exit) where
-/// starting the service would be undesirable.
+/// Send a command over the persistent connection with a 10s default reply
+/// timeout. Used for best-effort work (like disconnect-on-exit) where starting
+/// the service would be undesirable.
 async fn send_command_impl(cmd: &str) -> Result<String, String> {
     send_command_impl_timeout(cmd, 10000).await
 }
@@ -310,7 +374,7 @@ async fn send_command_impl(cmd: &str) -> Result<String, String> {
 /// `down` if a daemon is already alive (no service start), and never blocks the
 /// exit on failures — the daemon cleans up stale state on its next `up`.
 async fn disconnect_before_exit() -> Result<(), String> {
-    if !is_daemon_alive().await {
+    if is_daemon_alive().await.is_err() {
         return Ok(()); // nothing to tear down
     }
     let resp = send_command_impl("down").await?;
@@ -321,7 +385,7 @@ async fn disconnect_before_exit() -> Result<(), String> {
 }
 
 async fn read_status_line() -> Result<String, String> {
-    // Status reads reuse the daemon's single named pipe (the "status" command
+    // Status reads reuse the daemon's single connection (the "status" command
     // is served there), so there is no separate status broadcast port.
     let line = send_command_impl("status").await?;
     println!("{}", line);
@@ -352,8 +416,7 @@ async fn disconnect_vpn() -> Result<(), String> {
 
 #[tauri::command]
 async fn check_config_and_connect(app: tauri::AppHandle) -> Result<(), String> {
-    let config_path = helper_path("talkuwg.conf")
-        .map_err(|_| "Could not find talkuwg config path".to_string())?;
+    let config_path = vpn_config_path()?;
     let version = &app.package_info().version;
     let client_version = config::client_version(version.major, version.minor);
 
@@ -374,8 +437,7 @@ async fn check_config_and_connect(app: tauri::AppHandle) -> Result<(), String> {
 /// (the `ensure_config_up_to_date` "missing config" path).
 #[tauri::command]
 fn delete_config() -> Result<(), String> {
-    let config_path = helper_path("talkuwg.conf")
-        .map_err(|_| "Could not find talkuwg config path".to_string())?;
+    let config_path = vpn_config_path()?;
     config::delete_config_file(&config_path).map_err(|e| e.to_string())
 }
 
@@ -521,6 +583,7 @@ const AUTOSTART_REG_NAME: &str = "TalkU";
 /// Path (`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`) used to launch
 /// the app at logon. Only touches the current user's key, so no elevation is
 /// needed.
+#[cfg(windows)]
 fn autostart_reg_path() -> winreg::RegKey {
     use winreg::enums::HKEY_CURRENT_USER;
     winreg::RegKey::predef(HKEY_CURRENT_USER)
@@ -537,6 +600,7 @@ fn autostart_reg_path() -> winreg::RegKey {
 }
 
 /// Is the app currently set to launch on sign-in?
+#[cfg(windows)]
 #[tauri::command]
 fn get_launch_on_startup() -> Result<bool, String> {
     let reg = autostart_reg_path();
@@ -551,11 +615,11 @@ fn get_launch_on_startup() -> Result<bool, String> {
 /// the full path to this executable (with `--autostart`, so a startup run
 /// starts hidden/background); disabled removes the value.
 #[tauri::command]
+#[cfg(windows)]
 fn set_launch_on_startup(enabled: bool, app: tauri::AppHandle) -> Result<(), String> {
     let reg = autostart_reg_path();
     if enabled {
-        let exe = std::env::current_exe()
-            .map_err(|e| format!("failed to get exe path: {e}"))?;
+        let exe = std::env::current_exe().map_err(|e| format!("failed to get exe path: {e}"))?;
         let cmd = format!("\"{}\" --autostart", exe.display());
         reg.set_value(AUTOSTART_REG_NAME, &cmd)
             .map_err(|e| format!("failed to enable autostart: {e}"))?;
@@ -645,7 +709,11 @@ fn add_monitored_game(
     }
     let normalized = settings::normalize_game(name);
     if let Ok(mut s) = settings.lock() {
-        if !s.monitored_games.iter().any(|g| settings::normalize_game(g) == normalized) {
+        if !s
+            .monitored_games
+            .iter()
+            .any(|g| settings::normalize_game(g) == normalized)
+        {
             s.monitored_games.push(name.to_string());
         }
         let path = settings_path(&app)?;
@@ -699,10 +767,8 @@ async fn watch_games(app: tauri::AppHandle, settings: SharedSettings) {
 
         let any_running = if enabled && !games.is_empty() {
             system.refresh_processes();
-            let game_names: Vec<String> = games
-                .iter()
-                .map(|g| settings::normalize_game(g))
-                .collect();
+            let game_names: Vec<String> =
+                games.iter().map(|g| settings::normalize_game(g)).collect();
             system.processes().values().any(|p| {
                 let name = settings::normalize_game(&p.name().to_string());
                 game_names.contains(&name)
@@ -733,7 +799,11 @@ async fn watch_games(app: tauri::AppHandle, settings: SharedSettings) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+    let audio_player = AudioPlayer::init().expect("Failed to initialize audio system");
+
     tauri::Builder::default()
+        .manage(audio_player)
         .plugin(
             tauri_plugin_log::Builder::new()
                 .level(tauri_plugin_log::log::LevelFilter::Info)
@@ -746,18 +816,22 @@ pub fn run() {
             }
         }))
         .plugin(tauri_plugin_opener::init())
-        .manage(std::sync::Arc::new(std::sync::Mutex::new(
-            settings::AppSettings::default(),
-        )) as SharedSettings)
+        .manage(
+            std::sync::Arc::new(std::sync::Mutex::new(settings::AppSettings::default()))
+                as SharedSettings,
+        )
         .invoke_handler(tauri::generate_handler![
-            get_connected_users_count,
-            get_vpn_status,
+            play_audio,
+            stop_audio,
             check_config_and_connect,
             disconnect_vpn,
+            get_vpn_status,
+            delete_config,
+            get_connected_users_count,
             list_processes,
             collect_unreachable,
-            get_launch_on_startup,
-            set_launch_on_startup,
+            // get_launch_on_startup,
+            // set_launch_on_startup,
             get_auto_connect,
             set_auto_connect,
             get_monitored_games,
@@ -769,15 +843,33 @@ pub fn run() {
             set_tray_icon
         ])
         .setup(|app| {
-            if cfg!(target_os = "linux") {
-                let cache_dir = app.path().cache_dir()?;
-                let package_info = app.package_info();
-                let app_name = package_info.name.as_str();
-                let app_cache = cache_dir.join(app_name);
-                if app_cache.exists() {
-                    let _ = fs::remove_dir_all(&app_cache);
-                }
-            }
+            //             #[cfg(target_os = "linux")]
+            //             {
+            //                 let window = app.get_webview_window("main").unwrap();
+            //                 window
+            //                     .set_size(Size::Logical(tauri::LogicalSize {
+            //                         width: 450.0,
+            //                         height: 400.0,
+            //                     }))
+            //                     .unwrap();
+            //
+            //                 window
+            //                     .set_max_size(Some(Size::Logical(tauri::LogicalSize {
+            //                         width: 450.0,
+            //                         height: 400.0,
+            //                     })))
+            //                     .unwrap();
+            //             }
+
+            // if cfg!(target_os = "linux") {
+            //     let cache_dir = app.path().cache_dir()?;
+            //     let package_info = app.package_info();
+            //     let app_name = package_info.name.as_str();
+            //     let app_cache = cache_dir.join(app_name);
+            //     if app_cache.exists() {
+            //         let _ = fs::remove_dir_all(&app_cache);
+            //     }
+            // }
 
             // Load persisted settings (monitored games + auto-connect flag) into
             // the managed state, then start the background game watcher.
@@ -810,16 +902,17 @@ pub fn run() {
                 .menu(&menu)
                 .show_menu_on_left_click(false)
                 .on_tray_icon_event(|tray, event| {
-                    if let tauri::tray::TrayIconEvent::DoubleClick {
-                        button: tauri::tray::MouseButton::Left,
-                        ..
-                    } = event
-                    {
-                        if let Some(window) = tray.app_handle().get_webview_window("main") {
-                            let _ = window.show();
-                            let _ = window.set_focus();
-                        }
+                    println!("Tray event");
+                    if let Some(window) = tray.app_handle().get_webview_window("main") {
+                        let _ = window.show();
+                        let _ = window.set_focus();
                     }
+                    // if let tauri::tray::TrayIconEvent::Click {
+                    //     button: tauri::tray::MouseButton::Left,
+                    //     ..
+                    // } = event
+                    // {
+                    // }
                 })
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "show" => {
@@ -832,6 +925,7 @@ pub fn run() {
                         // Disconnect cleanly (if connected) before exiting so the
                         // tunnel/adapter is torn down rather than left running.
                         let _ = tauri::async_runtime::block_on(disconnect_before_exit());
+
                         app.exit(0);
                     }
                     _ => {}
