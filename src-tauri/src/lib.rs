@@ -12,6 +12,10 @@ use tauri::{
     Emitter, Manager,
 };
 
+/// Path of a file that ships next to the installed app binaries (Windows
+/// install layout). Only meaningful on Windows, where helper binaries live
+/// beside the app executable.
+#[cfg(windows)]
 fn helper_path(file_name: &str) -> Result<std::path::PathBuf, String> {
     let current_exe =
         std::env::current_exe().map_err(|e| format!("Failed to get current exe path: {e}"))?;
@@ -577,61 +581,93 @@ async fn get_connected_users_count() -> Result<i32, String> {
     Ok(body.connected_users)
 }
 
-/// Registry value name under which the app registers itself for autostart.
-const AUTOSTART_REG_NAME: &str = "TalkU";
+/// App name used for the autostart registration: the value name under
+/// `HKCU\...\CurrentVersion\Run` on Windows, and the file name of the XDG
+/// autostart entry (`~/.config/autostart/TalkU.desktop`) on Linux. Shared by
+/// the autostart plugin registration and the icon patch below.
+const AUTOSTART_APP_NAME: &str = "TalkU";
 
-/// Path (`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`) used to launch
-/// the app at logon. Only touches the current user's key, so no elevation is
-/// needed.
-#[cfg(windows)]
-fn autostart_reg_path() -> winreg::RegKey {
-    use winreg::enums::HKEY_CURRENT_USER;
-    winreg::RegKey::predef(HKEY_CURRENT_USER)
-        .open_subkey_with_flags(
-            r"Software\Microsoft\Windows\CurrentVersion\Run",
-            winreg::enums::KEY_READ | winreg::enums::KEY_WRITE,
-        )
-        .unwrap_or_else(|_| {
-            winreg::RegKey::predef(HKEY_CURRENT_USER)
-                .create_subkey(r"Software\Microsoft\Windows\CurrentVersion\Run")
-                .unwrap()
-                .0
-        })
-}
+/// Icon name for the Linux XDG autostart entry. Matches the icon the Tauri
+/// bundler installs into the hicolor theme (`talku.png`) and the one in its
+/// own generated desktop file, so desktops show the TalkU logo in
+/// startup-applications panels instead of a generic icon.
+#[cfg(target_os = "linux")]
+const AUTOSTART_ICON_NAME: &str = "talku";
 
 /// Is the app currently set to launch on sign-in?
-#[cfg(windows)]
 #[tauri::command]
-fn get_launch_on_startup() -> Result<bool, String> {
-    let reg = autostart_reg_path();
-    match reg.get_value::<String, _>(AUTOSTART_REG_NAME) {
-        Ok(v) => Ok(!v.is_empty()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(e) => Err(format!("failed to read autostart setting: {e}")),
-    }
+fn get_launch_on_startup(app: tauri::AppHandle) -> Result<bool, String> {
+    use tauri_plugin_autostart::ManagerExt;
+    app.autolaunch().is_enabled().map_err(|e| e.to_string())
 }
 
 /// Enable or disable launching the app when the user signs in. Enabled writes
 /// the full path to this executable (with `--autostart`, so a startup run
-/// starts hidden/background); disabled removes the value.
+/// starts hidden/background); disabled removes the entry.
 #[tauri::command]
-#[cfg(windows)]
 fn set_launch_on_startup(enabled: bool, app: tauri::AppHandle) -> Result<(), String> {
-    let reg = autostart_reg_path();
+    use tauri_plugin_autostart::ManagerExt;
+    let autostart = app.autolaunch();
     if enabled {
-        let exe = std::env::current_exe().map_err(|e| format!("failed to get exe path: {e}"))?;
-        let cmd = format!("\"{}\" --autostart", exe.display());
-        reg.set_value(AUTOSTART_REG_NAME, &cmd)
-            .map_err(|e| format!("failed to enable autostart: {e}"))?;
+        autostart.enable().map_err(|e| e.to_string())?;
+        // The plugin's generated XDG entry carries no icon, so Linux desktops
+        // would show a generic one in startup-applications panels; patch ours
+        // into the entry the plugin just wrote.
+        #[cfg(target_os = "linux")]
+        add_icon_to_autostart_entry()?;
     } else {
-        match reg.delete_value(AUTOSTART_REG_NAME) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(format!("failed to disable autostart: {e}")),
-        }
+        autostart.disable().map_err(|e| e.to_string())?;
     }
-    let _ = app;
     Ok(())
+}
+
+/// Patch an `Icon=` key into the XDG autostart entry the plugin writes, at
+/// `~/.config/autostart/TalkU.desktop`. A no-op when the entry already sets an
+/// icon (e.g. a hand-edited entry), so user choices are never overwritten.
+#[cfg(target_os = "linux")]
+fn add_icon_to_autostart_entry() -> Result<(), String> {
+    // Mirrors where `auto-launch` (the plugin's backend) puts the entry:
+    // `dirs::home_dir()/.config/autostart/{app_name}.desktop`.
+    let home = dirs::home_dir()
+        .ok_or_else(|| "could not resolve home directory for autostart entry".to_string())?;
+    let entry = home
+        .join(".config")
+        .join("autostart")
+        .join(format!("{AUTOSTART_APP_NAME}.desktop"));
+    add_icon_to_desktop_entry(&entry)
+}
+
+/// Add `Icon=` to the desktop entry at `entry`, if it has none yet.
+#[cfg(target_os = "linux")]
+fn add_icon_to_desktop_entry(entry: &std::path::Path) -> Result<(), String> {
+    let contents = std::fs::read_to_string(entry)
+        .map_err(|e| format!("failed to read autostart entry {}: {e}", entry.display()))?;
+    let Some(patched) = desktop_entry_with_icon(&contents, AUTOSTART_ICON_NAME) else {
+        return Ok(());
+    };
+    std::fs::write(entry, patched)
+        .map_err(|e| format!("failed to write autostart entry {}: {e}", entry.display()))
+}
+
+/// Return `contents` with an `Icon=` key appended, or `None` when the entry
+/// already sets one. The plugin's backend writes no trailing newline, so one
+/// is added before the key when missing.
+#[cfg(target_os = "linux")]
+fn desktop_entry_with_icon(contents: &str, icon_name: &str) -> Option<String> {
+    let has_icon = contents
+        .lines()
+        .any(|line| line.trim_start().to_ascii_lowercase().starts_with("icon="));
+    if has_icon {
+        return None;
+    }
+    let mut patched = contents.to_string();
+    if !patched.ends_with('\n') {
+        patched.push('\n');
+    }
+    patched.push_str("Icon=");
+    patched.push_str(icon_name);
+    patched.push('\n');
+    Some(patched)
 }
 
 /// Absolute path to the JSON file that persists app settings (the monitored
@@ -799,7 +835,9 @@ async fn watch_games(app: tauri::AppHandle, settings: SharedSettings) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Fixes graphical errors
     std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+
     let audio_player = AudioPlayer::init().expect("Failed to initialize audio system");
 
     tauri::Builder::default()
@@ -816,6 +854,17 @@ pub fn run() {
             }
         }))
         .plugin(tauri_plugin_opener::init())
+        // Launch-at-login. Uses the OS-native mechanism per platform: the
+        // `TalkU` value under HKCU\...\CurrentVersion\Run on Windows and an
+        // XDG autostart `.desktop` file in ~/.config/autostart on Linux.
+        // `--autostart` is passed back on startup runs so the app starts
+        // hidden in the tray instead of opening its window.
+        .plugin(
+            tauri_plugin_autostart::Builder::new()
+                .app_name(AUTOSTART_APP_NAME)
+                .args(["--autostart"])
+                .build(),
+        )
         .manage(
             std::sync::Arc::new(std::sync::Mutex::new(settings::AppSettings::default()))
                 as SharedSettings,
@@ -826,12 +875,11 @@ pub fn run() {
             check_config_and_connect,
             disconnect_vpn,
             get_vpn_status,
-            delete_config,
             get_connected_users_count,
             list_processes,
             collect_unreachable,
-            // get_launch_on_startup,
-            // set_launch_on_startup,
+            get_launch_on_startup,
+            set_launch_on_startup,
             get_auto_connect,
             set_auto_connect,
             get_monitored_games,
@@ -843,34 +891,6 @@ pub fn run() {
             set_tray_icon
         ])
         .setup(|app| {
-            //             #[cfg(target_os = "linux")]
-            //             {
-            //                 let window = app.get_webview_window("main").unwrap();
-            //                 window
-            //                     .set_size(Size::Logical(tauri::LogicalSize {
-            //                         width: 450.0,
-            //                         height: 400.0,
-            //                     }))
-            //                     .unwrap();
-            //
-            //                 window
-            //                     .set_max_size(Some(Size::Logical(tauri::LogicalSize {
-            //                         width: 450.0,
-            //                         height: 400.0,
-            //                     })))
-            //                     .unwrap();
-            //             }
-
-            // if cfg!(target_os = "linux") {
-            //     let cache_dir = app.path().cache_dir()?;
-            //     let package_info = app.package_info();
-            //     let app_name = package_info.name.as_str();
-            //     let app_cache = cache_dir.join(app_name);
-            //     if app_cache.exists() {
-            //         let _ = fs::remove_dir_all(&app_cache);
-            //     }
-            // }
-
             // Load persisted settings (monitored games + auto-connect flag) into
             // the managed state, then start the background game watcher.
             {
@@ -903,16 +923,16 @@ pub fn run() {
                 .show_menu_on_left_click(false)
                 .on_tray_icon_event(|tray, event| {
                     println!("Tray event");
-                    if let Some(window) = tray.app_handle().get_webview_window("main") {
-                        let _ = window.show();
-                        let _ = window.set_focus();
+                    if let tauri::tray::TrayIconEvent::Click {
+                        button: tauri::tray::MouseButton::Left,
+                        ..
+                    } = event
+                    {
+                        if let Some(window) = tray.app_handle().get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                        }
                     }
-                    // if let tauri::tray::TrayIconEvent::Click {
-                    //     button: tauri::tray::MouseButton::Left,
-                    //     ..
-                    // } = event
-                    // {
-                    // }
                 })
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "show" => {
@@ -932,9 +952,9 @@ pub fn run() {
                 })
                 .build(app)?;
 
-            // When launched via the registry Run entry (`--autostart`), start
+            // When launched at sign-in (registry Run entry on Windows, XDG
+            // autostart `.desktop` on Linux — both pass `--autostart`), start
             // hidden in the tray rather than showing the window.
-            #[cfg(windows)]
             if std::env::args().any(|a| a == "--autostart") {
                 if let Some(window) = app.get_webview_window("main") {
                     let _ = window.hide();
@@ -951,4 +971,39 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn autostart_entry_gets_icon_key() {
+        // Exact shape auto-launch 0.6.0 writes for the TalkU entry, including
+        // the missing trailing newline.
+        let generated = "[Desktop Entry]\nType=Application\nVersion=1.0\nName=TalkU\nComment=TalkU startup script\nExec=/usr/bin/talku --autostart\nStartupNotify=false\nTerminal=false";
+        let entry = std::env::temp_dir().join("talku-autostart-test.desktop");
+        std::fs::write(&entry, generated).unwrap();
+
+        add_icon_to_desktop_entry(&entry).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&entry).unwrap(),
+            format!("{generated}\nIcon=talku\n")
+        );
+
+        // Idempotent: a second pass leaves the already-patched entry alone.
+        add_icon_to_desktop_entry(&entry).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&entry).unwrap(),
+            format!("{generated}\nIcon=talku\n")
+        );
+
+        // An icon the user set themselves is never overwritten.
+        let hand_edited = "[Desktop Entry]\nName=TalkU\nIcon=custom-icon\n";
+        std::fs::write(&entry, hand_edited).unwrap();
+        add_icon_to_desktop_entry(&entry).unwrap();
+        assert_eq!(std::fs::read_to_string(&entry).unwrap(), hand_edited);
+
+        std::fs::remove_file(&entry).unwrap();
+    }
 }

@@ -143,14 +143,11 @@ pub async fn get_config_from_server(
         )));
     }
 
-    let server_config: ServerConfig = response
-        .json()
-        .await
-        .map_err(|e| {
-            ConfigError(format!(
-                "Failed to decode config from server (HTTP {status}): {e}"
-            ))
-        })?;
+    let server_config: ServerConfig = response.json().await.map_err(|e| {
+        ConfigError(format!(
+            "Failed to decode config from server (HTTP {status}): {e}"
+        ))
+    })?;
 
     Ok((server_config, private_key))
 }
@@ -168,10 +165,7 @@ pub async fn fetch_config_version() -> Result<u64, ConfigError> {
 
     if !response.status().is_success() {
         let status = response.status();
-        let body = response
-            .text()
-            .await
-            .unwrap_or_default();
+        let body = response.text().await.unwrap_or_default();
         return Err(ConfigError(http_error_message(
             "config_version",
             status,
