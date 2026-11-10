@@ -415,12 +415,14 @@ async fn disconnect_vpn() -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn check_config_and_connect() -> Result<(), String> {
+async fn check_config_and_connect(app: tauri::AppHandle) -> Result<(), String> {
     let config_path = vpn_config_path()?;
+    let version = &app.package_info().version;
+    let client_version = config::client_version(version.major, version.minor);
 
     // Compare the locally cached config version with the server's and, if the
     // server has a newer config, refetch it before connecting.
-    config::ensure_config_up_to_date(&config_path)
+    config::ensure_config_up_to_date(&config_path, client_version)
         .await
         .map_err(|e| e.to_string())?;
 

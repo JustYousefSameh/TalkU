@@ -2,6 +2,7 @@
 import { ref, onMounted, onUnmounted } from "vue";
 import { Settings, Minus, X } from "lucide-vue-next";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { getVersion } from "@tauri-apps/api/app";
 import { info } from "@tauri-apps/plugin-log";
 import SettingsMenu from "./SettingsMenu.vue";
 import MonitorMenu from "./MonitorMenu.vue";
@@ -10,6 +11,9 @@ import { useUnreachableScan } from "./composables/useUnreachableScan";
 const settingsOpen = ref(false);
 const monitorOpen = ref(false);
 const appbarRef = ref<HTMLDivElement | null>(null);
+// Read from tauri.conf.json so the label can't drift from the real version.
+// Shown like our release tags: 3.0.0 -> V3.0, 3.0.1 -> V3.0.1.
+const version = ref("");
 
 const { scanning, start: startScan, dispose } = useUnreachableScan();
 
@@ -40,8 +44,9 @@ function onDocumentClick(e: MouseEvent) {
     }
 }
 
-onMounted(() => {
+onMounted(async () => {
     document.addEventListener("click", onDocumentClick);
+    version.value = (await getVersion()).replace(/\.0$/, "");
 });
 onUnmounted(() => {
     document.removeEventListener("click", onDocumentClick);
@@ -56,7 +61,7 @@ onUnmounted(() => {
         >
             <div class="flex-1">
                 <span class="app-title text-gray-300 pr-1 text-sm">TalkU</span>
-                <span class="text-gray-500 text-xs">V3.0</span>
+                <span v-if="version" class="text-gray-500 text-xs">V{{ version }}</span>
             </div>
             <div class="flex flex-row gap-5 items-center relative">
                 <button

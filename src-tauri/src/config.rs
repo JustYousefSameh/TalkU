@@ -14,10 +14,19 @@ struct ClientKey<'a> {
     client_version: f32,
 }
 
-/// The client app version reported to the server. Keep this in sync with the
-/// app's shipped version (e.g. "2.4" => 2.4); the server rejects clients below
-/// `requiredVersion`.
-const CURRENT_APP_VERSION: f32 = 3.0;
+/// The app version as the server's `clientVersion` float: `3.0.0` => `3.0`,
+/// `3.1.2` => `3.1`. The server rejects clients below its `requiredVersion`,
+/// so this comes from the real app version instead of a number we'd have to
+/// remember to bump by hand.
+///
+/// Heads up: because the server compares a decimal number, `3.10` arrives as
+/// `3.1` and looks *older* than `3.9`. Until the server compares versions
+/// properly, go from `3.9` straight to `4.0` instead of releasing `3.10`.
+pub fn client_version(major: u64, minor: u64) -> f32 {
+    format!("{major}.{minor}")
+        .parse()
+        .expect("two integers joined by a dot always parse as a float")
+}
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ServerConfig {
@@ -99,7 +108,9 @@ fn http_error_message(endpoint: &str, status: reqwest::StatusCode, body: &str) -
     format!("Server returned HTTP {status} on `{endpoint}`")
 }
 
-pub async fn get_config_from_server() -> Result<(ServerConfig, String), ConfigError> {
+pub async fn get_config_from_server(
+    client_version: f32,
+) -> Result<(ServerConfig, String), ConfigError> {
     // Generate public and private key
     let keypair = Keypair::generate();
     let public_key = keypair.public_key;
@@ -110,7 +121,7 @@ pub async fn get_config_from_server() -> Result<(ServerConfig, String), ConfigEr
     let client_key = ClientKey {
         client_pub_key: &public_key,
         api_key: "z~WXkukTav2^dodr5#9",
-        client_version: CURRENT_APP_VERSION,
+        client_version,
     };
 
     let client = reqwest::Client::new();
@@ -336,7 +347,10 @@ pub fn delete_config_file(path: &std::path::Path) -> Result<(), ConfigError> {
 /// `exchange_keys/` to fetch a fresh config and overwrite the cached file. This
 /// is what makes config changes on the server reach installed clients: bump
 /// `config_version` on the backend and the next connect picks the new config up.
-pub async fn ensure_config_up_to_date(path: &std::path::Path) -> Result<(), ConfigError> {
+pub async fn ensure_config_up_to_date(
+    path: &std::path::Path,
+    client_version: f32,
+) -> Result<(), ConfigError> {
     // If there is no usable cached config, just fetch a fresh one (stamping the
     // current server version so we don't re-register on the next connect).
     if load_config(path).is_err() {
@@ -347,7 +361,7 @@ pub async fn ensure_config_up_to_date(path: &std::path::Path) -> Result<(), Conf
                 0
             }
         };
-        let (server, private_key) = get_config_from_server().await?;
+        let (server, private_key) = get_config_from_server(client_version).await?;
         let mut server = server;
         server.config_version = remote_version;
         let config = Config {
@@ -379,7 +393,7 @@ pub async fn ensure_config_up_to_date(path: &std::path::Path) -> Result<(), Conf
             "Server config version {remote_version} is newer than cached {}; refetching",
             cached_config_version(path)
         );
-        let (server, private_key) = get_config_from_server().await?;
+        let (server, private_key) = get_config_from_server(client_version).await?;
         let mut server = server;
         server.config_version = remote_version;
         let config = Config {
