@@ -216,7 +216,32 @@ fn write_config(path: &std::path::Path, config: &Config) -> Result<(), ConfigErr
         "ConfigVersion = {}\n",
         config.server.config_version
     ));
-    std::fs::write(path, s).map_err(|e| ConfigError(e.to_string()))
+
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+        // The file holds the WireGuard private key. Create it 0600 and force the
+        // mode on rewrite too (an existing file keeps whatever mode it had).
+        // The shared /var/lib/talku directory is group-talku, so the daemon can
+        // still read it while other users cannot.
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)
+            .map_err(|e| ConfigError(e.to_string()))?;
+        file.write_all(s.as_bytes())
+            .map_err(|e| ConfigError(e.to_string()))?;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, s).map_err(|e| ConfigError(e.to_string()))
+    }
 }
 
 pub fn load_config(path: &std::path::Path) -> Result<Config, ConfigError> {

@@ -7,6 +7,8 @@ use std::time::{Duration, Instant};
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 
+use interprocess::local_socket::traits::tokio::Listener as _;
+
 use defguard_wireguard_rs::{
     key::Key, net::IpAddrMask, peer::Peer, InterfaceConfiguration, WGApi, WireguardInterfaceApi,
 };
@@ -117,9 +119,7 @@ fn parse_config(path: &str) -> Result<Config, String> {
             }
             "extra" => match key.as_str() {
                 "remoteip" => config.remote_ip = Some(value.to_string()),
-                "wstunnelremoteport" => {
-                    config.wstunnel_remote_port = Some(value.to_string())
-                }
+                "wstunnelremoteport" => config.wstunnel_remote_port = Some(value.to_string()),
                 _ => {}
             },
             _ => {}
@@ -143,15 +143,32 @@ fn comma_split(value: &str) -> Vec<String> {
         .collect()
 }
 
+/// Default path to the cached WireGuard config file. Windows keeps it next to
+/// the installed binaries (next to `talku-cli.exe`). On Unix it is shared state:
+/// the root daemon reads it, the non-root app writes it. `TALKU_CONFIG`
+/// overrides the default for development, matching the app's resolver.
+fn default_config_path() -> std::path::PathBuf {
+    if let Some(path) = std::env::var_os("TALKU_CONFIG") {
+        return std::path::PathBuf::from(path);
+    }
+    #[cfg(unix)]
+    {
+        std::path::PathBuf::from("/var/lib/talku/talkuwg.conf")
+    }
+    #[cfg(windows)]
+    {
+        exe_dir()
+            .map(|dir| dir.join(DEFAULT_CONFIG))
+            .unwrap_or_else(|_| std::path::PathBuf::from(DEFAULT_CONFIG))
+    }
+}
+
 fn load_config() -> Result<Config, String> {
     let path = match std::env::args().nth(2) {
-        Some(p) => p,
-        None => exe_dir()?
-            .join(DEFAULT_CONFIG)
-            .to_string_lossy()
-            .into_owned(),
+        Some(p) => std::path::PathBuf::from(p),
+        None => default_config_path(),
     };
-    parse_config(&path)
+    parse_config(&path.to_string_lossy())
 }
 
 fn exe_dir() -> Result<std::path::PathBuf, String> {
@@ -163,24 +180,34 @@ fn exe_dir() -> Result<std::path::PathBuf, String> {
         .ok_or_else(|| "Current exe has no parent directory".to_string())
 }
 
+/// On Windows the daemon writes `talku-cli.log` next to its executable (there is
+/// no journald). On Unix the packaged daemon runs under systemd, so log to
+/// stderr and let journald own rotation and storage.
 fn log(msg: &str) {
-    use std::io::Write;
-    let dir = match exe_dir() {
-        Ok(d) => d,
-        Err(_) => return,
-    };
-    let path = dir.join("talku-cli.log");
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let line = format!("[{now}] {msg}\n");
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
+    #[cfg(windows)]
     {
-        let _ = f.write_all(line.as_bytes());
+        use std::io::Write;
+        let dir = match exe_dir() {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        let path = dir.join("talku-cli.log");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let line = format!("[{now}] {msg}\n");
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            let _ = f.write_all(line.as_bytes());
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        eprintln!("{msg}");
     }
 }
 
@@ -239,6 +266,44 @@ fn cleanup_stale_interface() {
     }
 }
 
+/// Locate the `wstunnel` binary the daemon should execute. The packaged layout
+/// puts it next to `talku-cli` (named `talku-wstunnel` on Unix so it cannot
+/// collide with a system-wide wstunnel). A plain `wstunnel` next to the daemon
+/// and, on Unix only, `wstunnel` on `PATH` are dev fallbacks.
+fn find_wstunnel() -> Result<std::path::PathBuf, String> {
+    let dir = exe_dir()?;
+
+    #[cfg(windows)]
+    {
+        for name in ["talku-wstunnel.exe", "wstunnel.exe"] {
+            let candidate = dir.join(name);
+            if candidate.exists() {
+                return Ok(candidate);
+            }
+        }
+        Err(format!("wstunnel not found in {}", dir.display()))
+    }
+
+    #[cfg(unix)]
+    {
+        for name in ["talku-wstunnel", "wstunnel"] {
+            let candidate = dir.join(name);
+            if candidate.exists() {
+                return Ok(candidate);
+            }
+        }
+        if let Some(path) = std::env::var_os("PATH") {
+            for dir in std::env::split_paths(&path) {
+                let candidate = dir.join("wstunnel");
+                if candidate.exists() {
+                    return Ok(candidate);
+                }
+            }
+        }
+        Err("wstunnel not found next to the daemon or on PATH".to_string())
+    }
+}
+
 fn start_wstunnel(cfg: &Config) -> Result<std::process::Child, String> {
     let remote_host = cfg.remote_ip.as_deref().unwrap_or(DEFAULT_WSTUNNEL_HOST);
     let remote_port = cfg
@@ -253,19 +318,12 @@ fn start_wstunnel(cfg: &Config) -> Result<std::process::Child, String> {
         &format!("wss://{remote_host}:{remote_port}"),
     ];
 
-    let exe = exe_dir()?.join(if cfg!(target_os = "windows") {
-        "wstunnel.exe"
-    } else {
-        "wstunnel"
-    });
-    if !exe.exists() {
-        return Err(format!("wstunnel not found at {:?}", exe));
-    }
+    let exe = find_wstunnel()?;
 
     std::process::Command::new(&exe)
         .args(args)
         .spawn()
-        .map_err(|e| format!("Failed to start wstunnel: {e}"))
+        .map_err(|e| format!("Failed to start {}: {e}", exe.display()))
 }
 
 /// Wait until something has bound the local UDP `port`, i.e. wstunnel's tunnel
@@ -723,11 +781,10 @@ fn send_unreachable_report(process_name: &str, ips: &[String]) -> Result<(), Str
 }
 
 /// Run `talku-cli daemon` (the dev/manual fallback when the TalkUCLI service is
-/// not registered/enrolled). It serves the exact same named-pipe protocol
-/// (`\\.\pipe\TalkUCLI` → `ping`/`up`/`down`/`status`) that the Windows service
-/// serves in-process, so the app talks to it identically whether the daemon is
-/// running as the service or as a manually-started process.
-#[cfg(windows)]
+/// not registered/enrolled). It serves the exact same IPC protocol
+/// (`ping`/`up`/`down`/`status`) that the Windows service serves in-process, so
+/// the app talks to it identically whether the daemon is running as the service
+/// or as a manually-started process.
 fn run_daemon() -> ExitCode {
     let daemon = Arc::new(Mutex::new(Daemon::default()));
     let runtime = match tokio::runtime::Builder::new_multi_thread()
@@ -740,33 +797,142 @@ fn run_daemon() -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    log("daemon: starting named-pipe server on \\\\.\\pipe\\TalkUCLI");
+    log(&format!(
+        "daemon: starting IPC server on {}",
+        socket_description()
+    ));
     let unreachable_busy = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let _ = runtime.block_on(run_pipe_server(daemon, unreachable_busy));
-    ExitCode::SUCCESS
+    match runtime.block_on(run_socket_server(daemon, unreachable_busy)) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            log(&format!(
+                "daemon: failed to serve {}: {e}",
+                socket_description()
+            ));
+            ExitCode::from(1)
+        }
+    }
 }
 
-#[cfg(not(windows))]
-fn run_daemon() -> ExitCode {
-    eprintln!("daemon (named pipe) mode is only supported on Windows");
-    ExitCode::from(1)
-}
-
+#[cfg(windows)]
 const SERVICE_NAME: &str = "TalkUCLI";
-const PIPE_NAME: &str = r"\\.\pipe\TalkUCLI";
 /// Win32 ERROR_FAILED_SERVICE_CONTROLLER_CONNECT, returned by
 /// `service_dispatcher::start` when this process was NOT started by the
 /// Service Control Manager (i.e. it was run from a shell). We use that to fall
 /// back to the normal CLI argument mode in development / manual debugging.
+#[cfg(windows)]
 const ERROR_FAILED_SERVICE_CONTROLLER_CONNECT: i32 = 1063;
+
+/// Human-readable form of the IPC endpoint, for logs and error messages.
+#[cfg(windows)]
+fn socket_description() -> String {
+    r"\\.\pipe\TalkUCLI".to_string()
+}
+
+#[cfg(unix)]
+const DEFAULT_SOCKET_PATH: &str = "/run/talku/talku-cli.sock";
+
+/// Filesystem path of the Unix-domain socket. `TALKU_SOCKET` overrides it so a
+/// development daemon and app can agree on a private location without root.
+#[cfg(unix)]
+fn socket_path() -> std::path::PathBuf {
+    std::env::var_os("TALKU_SOCKET")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(DEFAULT_SOCKET_PATH))
+}
+
+#[cfg(unix)]
+fn socket_description() -> String {
+    socket_path().display().to_string()
+}
+
+/// Create the platform-local listener. Windows keeps the named pipe and the
+/// Everyone DACL the installer/service has always used; Unix binds a
+/// filesystem socket with mode 0660 so only the owning group can talk to it.
+fn create_socket_listener() -> std::io::Result<interprocess::local_socket::tokio::Listener> {
+    #[cfg(unix)]
+    {
+        use interprocess::local_socket::{GenericFilePath, ListenerOptions, ToFsName};
+        use interprocess::os::unix::local_socket::ListenerOptionsExt;
+
+        let path = socket_path();
+        if let Some(parent) = path.parent() {
+            // Best-effort: the packaged service creates /run/talku through its
+            // systemd unit (RuntimeDirectory=). In dev this makes a private
+            // TALKU_SOCKET location work without extra setup.
+            let _ = std::fs::create_dir_all(parent);
+        }
+
+        let bind = || {
+            // Temporarily clear umask so our explicit mode isn't filtered out by the OS
+            #[cfg(unix)]
+            let old_mask = unsafe { libc::umask(0) };
+
+            let name = path.as_path().to_fs_name::<GenericFilePath>()?;
+            let result = ListenerOptions::new().name(name).mode(0660).create_tokio();
+
+            // Restore the old umask
+            #[cfg(unix)]
+            unsafe {
+                libc::umask(old_mask);
+            };
+
+            // Extra safety: explicitly force permissions in case the filesystem/umask interfered
+            #[cfg(unix)]
+            if result.is_ok() {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0660));
+            }
+
+            result
+        };
+
+        match bind() {
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+                // A previous daemon may have died without removing its socket
+                // file (SIGTERM/SIGKILL skips `Drop`). Probe the endpoint: if
+                // nothing is listening, remove the corpse and bind again. If a
+                // live daemon still answers, keep the error so we never take
+                // over an endpoint that is genuinely in use.
+                use std::os::unix::net::UnixStream;
+                if UnixStream::connect(&path).is_ok() {
+                    return Err(e);
+                }
+                std::fs::remove_file(&path)?;
+                bind()
+            }
+            other => other,
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        use interprocess::local_socket::{GenericNamespaced, ListenerOptions, ToNsName};
+        use interprocess::os::windows::local_socket::ListenerOptionsExt;
+        use interprocess::os::windows::security_descriptor::SecurityDescriptor;
+
+        // Same DACL as the previous hand-rolled pipe server: Everyone may use
+        // the pipe, so the non-elevated UI can reach the SYSTEM service.
+        let sddl = widestring::U16CString::from_str("D:(A;;GA;;;WD)").map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid SDDL literal")
+        })?;
+        let descriptor = SecurityDescriptor::deserialize(sddl.as_ucstr())?;
+        let name = "TalkUCLI".to_ns_name::<GenericNamespaced>()?;
+        ListenerOptions::new()
+            .name(name)
+            .security_descriptor(descriptor)
+            .create_tokio()
+    }
+}
 
 // Registers the service entry point that the Service Control Manager calls.
 #[cfg(windows)]
 windows_service::define_windows_service!(ffi_service_main, service_main);
 
 /// Entry point invoked by the SCM on a dedicated thread. `arguments` is the
-/// service-specific argument vector; we spawn a tokio named-pipe server that
-/// serves `ping`/`up`/`down`/`status` over `\\.\pipe\TalkUCLI`.
+/// service-specific argument vector; we spawn a tokio IPC server that serves
+/// `ping`/`up`/`down`/`status` over the platform local socket (the
+/// `\\.\pipe\TalkUCLI` named pipe on Windows).
 #[cfg(windows)]
 fn service_main(_arguments: Vec<std::ffi::OsString>) {
     use windows_service::service::{
@@ -813,11 +979,11 @@ fn service_main(_arguments: Vec<std::ffi::OsString>) {
     }
 
     let daemon = Arc::new(Mutex::new(Daemon::default()));
-    let daemon_for_pipe = daemon.clone();
+    let daemon_for_server = daemon.clone();
     let unreachable_busy = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
-    // Host the tokio named-pipe server on a background thread. We keep the
-    // service thread blocked here so the service stays alive until stopped.
+    // Host the tokio IPC server on a background thread. We keep the service
+    // thread blocked here so the service stays alive until stopped.
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -833,7 +999,7 @@ fn service_main(_arguments: Vec<std::ffi::OsString>) {
     let _runtime_thread = {
         let runtime = runtime;
         std::thread::spawn(move || {
-            let _ = runtime.block_on(run_pipe_server(daemon_for_pipe, unreachable_busy));
+            let _ = runtime.block_on(run_socket_server(daemon_for_server, unreachable_busy));
         })
     };
 
@@ -862,121 +1028,61 @@ fn service_stopped_status() -> windows_service::service::ServiceStatus {
     }
 }
 
-/// Runs the tokio named-pipe server for the life of the service/daemon. Accepts
-/// clients one at a time but never stops: after each connection is fully
-/// served, a fresh server instance is created so the pipe stays open and future
-/// clients keep working. Also logs a heartbeat every 2s proving the daemon is
-/// still alive and the pipe is still listening.
-#[cfg(windows)]
-async fn run_pipe_server(
+/// Runs the local-socket server for the life of the service/daemon. On Windows
+/// this is a named pipe and on Unix a filesystem Unix-domain socket; the
+/// `interprocess` crate handles the per-connection pipe-instance dance for us.
+/// Accepts connections forever, serving each one on its own task so a slow
+/// command cannot block a liveness probe.
+async fn run_socket_server(
     daemon: Arc<Mutex<Daemon>>,
     unreachable_busy: Arc<std::sync::atomic::AtomicBool>,
-) {
-    use std::ffi::c_void;
-    use std::ptr;
-
-    use tokio::net::windows::named_pipe::ServerOptions;
-    use tokio::time;
-
-    use windows_sys::Win32::Foundation::LocalFree;
-    use windows_sys::Win32::Security::Authorization::{
-        ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
-    };
-    use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
-
-    let sddl = "D:(A;;GA;;;WD)\0";
-    let wide_sddl: Vec<u16> = sddl.encode_utf16().collect();
-    let mut sd_ptr = ptr::null_mut();
-
-    let success = unsafe {
-        ConvertStringSecurityDescriptorToSecurityDescriptorW(
-            wide_sddl.as_ptr(),
-            SDDL_REVISION_1,
-            &mut sd_ptr,
-            ptr::null_mut(),
-        )
-    };
-
-    if success == 0 {
-        log(&format!(
-            "service: SDDL conversion failed: {}",
-            std::io::Error::last_os_error()
-        ));
-        return;
-    }
-
-    // 2. WRAP the Security Descriptor in a SECURITY_ATTRIBUTES struct
-    let mut sa = SECURITY_ATTRIBUTES {
-        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
-        lpSecurityDescriptor: sd_ptr,
-        bInheritHandle: 0,
-    };
-
-    // Create the initial pipe instance
-    let mut server = match unsafe {
-        ServerOptions::new()
-            .first_pipe_instance(true)
-            .create_with_security_attributes_raw(PIPE_NAME, &mut sa as *mut _ as *mut c_void)
-    } {
-        Ok(s) => s,
+) -> std::io::Result<()> {
+    let listener = match create_socket_listener() {
+        Ok(listener) => listener,
         Err(e) => {
-            log(&format!("service: failed to create initial pipe: {e}"));
-            unsafe {
-                LocalFree(sd_ptr as _);
-            }
-            return;
+            log(&format!(
+                "service: failed to create listener on {}: {e}",
+                socket_description()
+            ));
+            return Err(e);
         }
     };
 
-    log("service: pipe server listening");
+    log(&format!("service: listening on {}", socket_description()));
 
     loop {
-        if let Err(e) = server.connect().await {
-            log(&format!("service: pipe connect failed: {e}"));
-            break;
-        }
-
-        let daemon_c = daemon.clone();
-        let busy = unreachable_busy.clone();
-        tokio::spawn(handle_pipe_conn(daemon_c, busy, server));
-
-        // 3. APPLY the custom security attributes directly inline (No closure needed!)
-        match unsafe {
-            ServerOptions::new()
-                .create_with_security_attributes_raw(PIPE_NAME, &mut sa as *mut _ as *mut c_void)
-        } {
-            Ok(next) => server = next,
+        match listener.accept().await {
+            Ok(stream) => {
+                let daemon = daemon.clone();
+                let busy = unreachable_busy.clone();
+                tokio::spawn(handle_conn(daemon, busy, stream));
+            }
             Err(e) => {
-                log(&format!(
-                    "service: failed to create next pipe instance: {e}"
-                ));
-                break;
+                // A single failed accept should not kill the daemon: log it,
+                // back off briefly, and keep the endpoint alive for the next
+                // client (e.g. a truncated connection during startup).
+                log(&format!("service: accept failed: {e}"));
+                tokio::time::sleep(Duration::from_millis(100)).await;
             }
         }
-    }
-
-    // Clean up the security descriptor if the loop ever breaks
-    unsafe {
-        LocalFree(sd_ptr as _);
     }
 }
 
-/// Serves a single persistent named-pipe connection: loops reading
-/// newline-terminated commands, dispatching each against the shared `Daemon`,
-/// and writing back a newline-terminated reply for each, until the client
-/// disconnects. Protocol: `ping` -> `pong`, else `up`/`down`/`status` ->
-/// `ok`/`error ...`. This keeps the connection open (websocket-style) so one
-/// client can issue many commands without reconnecting.
-#[cfg(windows)]
-async fn handle_pipe_conn(
+/// Serves a single persistent connection: loops reading newline-terminated
+/// commands, dispatching each against the shared `Daemon`, and writing back a
+/// newline-terminated reply for each, until the client disconnects. Protocol:
+/// `ping` -> `pong`, else `up`/`down`/`status` -> `ok`/`error ...`. This keeps
+/// the connection open (websocket-style) so one client can issue many commands
+/// without reconnecting.
+async fn handle_conn(
     daemon: Arc<Mutex<Daemon>>,
     unreachable_busy: Arc<std::sync::atomic::AtomicBool>,
-    mut stream: tokio::net::windows::named_pipe::NamedPipeServer,
+    mut stream: interprocess::local_socket::tokio::Stream,
 ) {
     use tokio::io::AsyncWriteExt;
 
     loop {
-        let Some(cmd) = read_pipe_command(&mut stream).await else {
+        let Some(cmd) = read_command(&mut stream).await else {
             break; // client disconnected or error
         };
         if cmd.is_empty() {
@@ -1089,15 +1195,12 @@ async fn handle_pipe_conn(
     log("service: client disconnected");
 }
 
-/// Read a single newline-terminated command directly from the pipe stream,
+/// Read a single newline-terminated command directly from the connection,
 /// chunk-by-chunk, stopping at the first `\n`. Returns `None` if the client
 /// disconnects or a read error occurs. Reading straight from `stream` (rather
 /// than through a BufReader that would borrow it) lets the caller freely
 /// interleave reads and writes on the same persistent connection.
-#[cfg(windows)]
-async fn read_pipe_command(
-    stream: &mut tokio::net::windows::named_pipe::NamedPipeServer,
-) -> Option<String> {
+async fn read_command(stream: &mut interprocess::local_socket::tokio::Stream) -> Option<String> {
     use tokio::io::AsyncReadExt;
 
     let mut line = Vec::with_capacity(64);
@@ -1155,14 +1258,6 @@ fn main() -> ExitCode {
         }
     }
 
-    cli_main()
-}
-
-#[cfg(not(windows))]
-fn main() -> ExitCode {
-    if let Ok(dir) = exe_dir() {
-        let _ = std::env::set_current_dir(&dir);
-    }
     cli_main()
 }
 
