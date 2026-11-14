@@ -32,6 +32,28 @@
         "installerIcon": "icons/icon.ico"
       }
     },
+    "linux": {
+      "deb": {
+        "files": {
+          "/opt/talku/talku-cli": "binaries/talku-cli-x86_64-unknown-linux-gnu",
+          "/opt/talku/talku-wstunnel": "binaries/wstunnel-x86_64-unknown-linux-gnu",
+          "/lib/systemd/system/talku-cli.service": "../linux/talku-cli.service"
+        },
+        "postInstallScript": "../linux/postinst.sh",
+        "preRemoveScript": "../linux/prerm.sh",
+        "postRemoveScript": "../linux/postrm.sh"
+      },
+      "rpm": {
+        "files": {
+          "/opt/talku/talku-cli": "binaries/talku-cli-x86_64-unknown-linux-gnu",
+          "/opt/talku/talku-wstunnel": "binaries/wstunnel-x86_64-unknown-linux-gnu",
+          "/usr/lib/systemd/system/talku-cli.service": "../linux/talku-cli.service"
+        },
+        "postInstallScript": "../linux/postinst.sh",
+        "preRemoveScript": "../linux/prerm.sh",
+        "postRemoveScript": "../linux/postrm.sh"
+      }
+    },
     "resources": ["resources/*"],
     "active": true,
     "targets": "all",

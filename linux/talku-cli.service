@@ -1,0 +1,34 @@
+[Unit]
+Description=TalkU WireGuard daemon
+Documentation=https://github.com/JustYousefSameh/TalkU
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# /opt/talku holds both binary and its wstunnel sibling: the daemon resolves
+# `talku-wstunnel` relative to its own executable before ever consulting PATH.
+ExecStart=/opt/talku/talku-cli daemon
+# Best-effort tunnel teardown if the daemon dies without running `down`.
+ExecStopPost=-/opt/talku/talku-cli down
+Restart=on-failure
+RestartSec=2s
+
+# The daemon runs as root (it configures the WireGuard interface) with the
+# `talku` group so the desktop app, whose user is a member, can reach the
+# control socket in /run/talku and read/write the cached config in /var/lib/talku.
+Group=talku
+RuntimeDirectory=talku
+RuntimeDirectoryMode=0755
+StateDirectory=talku
+StateDirectoryMode=2770
+
+# PATH fallback for development installs that rely on a system wstunnel.
+# Packaged installs never get here: talku-wstunnel sits next to talku-cli.
+Environment=PATH=/usr/local/bin:/usr/bin
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -24,6 +24,9 @@ bun.lockb
 # rust compiled folders
 target/
 
+# Linux bundle inputs staged by scripts/prepare-linux-bundle.sh
+/src-tauri/binaries/*-unknown-linux-gnu
+
 # test video for streaming example
 streaming_example_test_video.mp4
 
