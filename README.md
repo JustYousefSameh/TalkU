@@ -42,7 +42,7 @@ The daemon needs `wstunnel`, and it must be the exact version TalkU pins: a dist
 ```bash
 # Debian/Ubuntu build dependencies (equivalent names exist for rpm distros)
 sudo apt install build-essential pkg-config libwebkit2gtk-4.1-dev libgtk-3-dev \
-  libayatana-appindicator3-dev librsvg2-dev libssl-dev
+  libayatana-appindicator3-dev librsvg2-dev libssl-dev libasound2-dev
 
 bun install
 bun run prepare:linux          # builds talku-cli, stages wstunnel 10.5.1 in src-tauri/binaries/
