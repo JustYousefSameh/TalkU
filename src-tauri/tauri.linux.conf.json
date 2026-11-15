@@ -1,6 +1,30 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "bundle": {
-    "targets": ["deb", "rpm"]
+    "targets": ["deb", "rpm"],
+    "homepage": "https://github.com/JustYousefSameh/TalkU",
+    "longDescription": "TalkU routes only a game's voice traffic over WireGuard, through a WebSocket tunnel, so gameplay traffic keeps its normal path and ping. The package installs a root systemd daemon that owns the WireGuard interface and runs the pinned wstunnel client from /opt/talku, plus a desktop app that controls the daemon over a local socket.",
+    "linux": {
+      "deb": {
+        "section": "net",
+        "depends": [
+          "libssl3 | libssl3t64",
+          "libbrotli1",
+          "libzstd1",
+          "ca-certificates"
+        ]
+      },
+      "rpm": {
+        "depends": [
+          "libssl.so.3()(64bit)",
+          "libcrypto.so.3()(64bit)",
+          "libbrotlienc.so.1()(64bit)",
+          "libbrotlidec.so.1()(64bit)",
+          "libz.so.1()(64bit)",
+          "libzstd.so.1()(64bit)",
+          "ca-certificates"
+        ]
+      }
+    }
   }
 }
