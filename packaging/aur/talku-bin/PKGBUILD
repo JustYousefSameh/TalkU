@@ -1,0 +1,49 @@
+# Maintainer: JustYousefSameh <mr.yousefsameh@gmail.com>
+#
+# Prebuilt Linux package: the desktop app, the root daemon and the pinned
+# wstunnel client come straight out of the upstream .deb so Arch users do not
+# need the Rust + bun + WebKit toolchain to install TalkU.
+#
+# After the release asset exists, refresh the checksum with:
+#   updpkgsums && makepkg --printsrcinfo > .SRCINFO
+
+pkgname=talku-bin
+pkgver=3.1.0
+pkgrel=1
+pkgdesc='Split-tunneling VPN that fixes in-game voice chat and lobby issues'
+arch=('x86_64')
+url='https://github.com/JustYousefSameh/TalkU'
+license=('custom')
+depends=(
+  'webkit2gtk-4.1'
+  'gtk3'
+  'libayatana-appindicator'
+  'openssl'
+  'brotli'
+  'zstd'
+  'ca-certificates'
+)
+provides=('talku')
+conflicts=('talku' 'talku-git')
+options=('!debug')
+install="$pkgname.install"
+source=("https://github.com/JustYousefSameh/TalkU/releases/download/v${pkgver}/TalkU_${pkgver}_amd64.deb")
+sha256sums=('SKIP') # replaced by updpkgsums once the release asset is published
+
+package() {
+  local deb="$srcdir/TalkU_${pkgver}_amd64.deb"
+  local src="$srcdir/payload"
+
+  install -d "$src"
+  bsdtar -xf "$deb" -C "$src" data.tar.*
+  bsdtar -xf "$src"/data.tar.* -C "$src"
+
+  # usr/bin/talku, the desktop entry, icons and sound resources, plus
+  # /opt/talku/{talku-cli,talku-wstunnel} — the daemon resolves its wstunnel
+  # sibling from its own directory before ever looking at PATH.
+  cp -a "$src/usr" "$src/opt" "$pkgdir/"
+
+  # Arch keeps vendor units in /usr/lib/systemd/system; the .deb uses /lib.
+  install -Dm644 "$src/lib/systemd/system/talku-cli.service" \
+    "$pkgdir/usr/lib/systemd/system/talku-cli.service"
+}

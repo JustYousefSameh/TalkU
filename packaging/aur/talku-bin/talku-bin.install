@@ -1,0 +1,47 @@
+# Hooks for talku-bin. Run as root by pacman; they mirror what the .deb/.rpm
+# maintainer scripts do, minus the auto-enable (Arch expects services to be
+# enabled explicitly).
+
+post_install() {
+  # Shared group: the root daemon and the desktop app (run by the user) both
+  # rely on it for /run/talku/talku-cli.sock and /var/lib/talku/talkuwg.conf.
+  if ! getent group talku >/dev/null 2>&1; then
+    groupadd --system talku
+  fi
+
+  # Group-writable, setgid, so the app can write the cached WireGuard config
+  # and the files it creates keep the talku group.
+  install -d -m 2770 -o root -g talku /var/lib/talku
+
+  if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ]; then
+    if ! id -nG "$SUDO_USER" 2>/dev/null | tr ' ' '\n' | grep -qx talku; then
+      usermod -aG talku "$SUDO_USER" || true
+      echo ">>> Added '$SUDO_USER' to the 'talku' group."
+      echo ">>> Log out and back in before starting TalkU."
+    fi
+  fi
+
+  systemctl daemon-reload 2>/dev/null || true
+
+  if ! systemctl is-enabled --quiet talku-cli.service 2>/dev/null; then
+    echo ">>> Start the daemon with: systemctl enable --now talku-cli"
+  fi
+}
+
+post_upgrade() {
+  systemctl daemon-reload 2>/dev/null || true
+  # Restart the daemon only if it was running, so a disabled service stays
+  # disabled and a stopped one stays stopped.
+  systemctl try-restart talku-cli.service 2>/dev/null || true
+}
+
+pre_remove() {
+  systemctl stop talku-cli.service 2>/dev/null || true
+  systemctl disable talku-cli.service 2>/dev/null || true
+}
+
+post_remove() {
+  systemctl daemon-reload 2>/dev/null || true
+  # /var/lib/talku (cached config) and the 'talku' group are intentionally
+  # kept: re-installing should not need a new login.
+}
