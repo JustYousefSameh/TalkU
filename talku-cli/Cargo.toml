@@ -6,6 +6,7 @@ description = "Standalone elevated WireGuard helper for TalkU"
 build = "build.rs"
 
 [dependencies]
+clap = "4"
 defguard_wireguard_rs = "0.11.2"
 log = "0.4"
 netstat2 = "0.11"
@@ -16,6 +17,12 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 interprocess = { version = "2.4", features = ["tokio"] }
 libc = "0.2.191"
+# The pinned wstunnel client, linked in-process instead of shipped as a sibling
+# executable. Not published on crates.io, so it is pinned to the v10.5.1 tag
+# commit; `ring` keeps the build toolchain portable (no cmake/NASM like the
+# upstream default aws-lc-rs) and the `clap` feature lets us build the exact
+# same config the standalone CLI would have parsed.
+wstunnel = { git = "https://github.com/erebe/wstunnel", rev = "08ef8b9e682c34c5a588448bacc4dcccfb8c40e8", default-features = false, features = ["clap", "ring"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.7"

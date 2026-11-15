@@ -4,10 +4,10 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-#[cfg(target_os = "windows")]
-use std::os::windows::process::CommandExt;
-
 use interprocess::local_socket::traits::tokio::Listener as _;
+
+mod embedded_tunnel;
+use embedded_tunnel::Tunnel;
 
 use defguard_wireguard_rs::{
     key::Key, net::IpAddrMask, peer::Peer, InterfaceConfiguration, WGApi, WireguardInterfaceApi,
@@ -211,36 +211,31 @@ fn log(msg: &str) {
     }
 }
 
-/// Kill any orphaned `wstunnel.exe` left behind by a previous daemon that
-/// exited without running `down` (otherwise port 51820 stays bound and a fresh
-/// tunnel cannot start). Also reaps our own stale child handle if present.
-fn kill_stale_wstunnel() {
-    #[cfg(target_os = "windows")]
-    {
-        use std::process::Stdio;
-        let mut cmd = std::process::Command::new("taskkill");
-        cmd.args(["/F", "/IM", "wstunnel.exe"])
-            .creation_flags(0x08000000) // CREATE_NO_WINDOW: don't flash a console
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        if cmd.status().map(|s| s.success()).unwrap_or(false) {
-            log("cleanup: killed stale wstunnel process");
+/// Forwards `log` records to the same sink as the daemon's own messages.
+/// wstunnel logs through `tracing`, which (with its `log` feature enabled by
+/// the library) emits `log` records when no tracing subscriber is installed, so
+/// this is how the in-process client's connection diagnostics reach journald.
+struct SinkLogger;
+
+impl log::Log for SinkLogger {
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
+        metadata.level() <= log::Level::Info
+    }
+
+    fn log(&self, record: &log::Record) {
+        if self.enabled(record.metadata()) {
+            log(&format!("tunnel: {}", record.args()));
         }
     }
-    #[cfg(not(target_os = "windows"))]
-    {
-        use std::process::Stdio;
-        if std::process::Command::new("pkill")
-            .args(["-f", "wstunnel"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
-        {
-            log("cleanup: killed stale wstunnel process");
-        }
-    }
+
+    fn flush(&self) {}
+}
+
+static SINK_LOGGER: SinkLogger = SinkLogger;
+
+fn init_logging() {
+    let _ = log::set_logger(&SINK_LOGGER);
+    log::set_max_level(log::LevelFilter::Info);
 }
 
 /// Remove any leftover `TalkU` WireGuard adapter from a previous session.
@@ -266,64 +261,15 @@ fn cleanup_stale_interface() {
     }
 }
 
-/// Locate the `wstunnel` binary the daemon should execute. The packaged layout
-/// puts it next to `talku-cli` (named `talku-wstunnel` on Unix so it cannot
-/// collide with a system-wide wstunnel). A plain `wstunnel` next to the daemon
-/// and, on Unix only, `wstunnel` on `PATH` are dev fallbacks.
-fn find_wstunnel() -> Result<std::path::PathBuf, String> {
-    let dir = exe_dir()?;
-
-    #[cfg(windows)]
-    {
-        for name in ["talku-wstunnel.exe", "wstunnel.exe"] {
-            let candidate = dir.join(name);
-            if candidate.exists() {
-                return Ok(candidate);
-            }
-        }
-        Err(format!("wstunnel not found in {}", dir.display()))
-    }
-
-    #[cfg(unix)]
-    {
-        for name in ["talku-wstunnel", "wstunnel"] {
-            let candidate = dir.join(name);
-            if candidate.exists() {
-                return Ok(candidate);
-            }
-        }
-        if let Some(path) = std::env::var_os("PATH") {
-            for dir in std::env::split_paths(&path) {
-                let candidate = dir.join("wstunnel");
-                if candidate.exists() {
-                    return Ok(candidate);
-                }
-            }
-        }
-        Err("wstunnel not found next to the daemon or on PATH".to_string())
-    }
-}
-
-fn start_wstunnel(cfg: &Config) -> Result<std::process::Child, String> {
-    let remote_host = cfg.remote_ip.as_deref().unwrap_or(DEFAULT_WSTUNNEL_HOST);
-    let remote_port = cfg
-        .wstunnel_remote_port
-        .as_deref()
-        .unwrap_or(DEFAULT_WSTUNNEL_PORT);
-
-    let args = [
-        "client",
-        "-L",
-        &format!("udp://{TUNNEL_PORT}:localhost:{TUNNEL_PORT}?timeout_sec=0"),
-        &format!("wss://{remote_host}:{remote_port}"),
-    ];
-
-    let exe = find_wstunnel()?;
-
-    std::process::Command::new(&exe)
-        .args(args)
-        .spawn()
-        .map_err(|e| format!("Failed to start {}: {e}", exe.display()))
+/// wstunnel server address from the config's `[Extra]` section, falling back to
+/// the built-in server when the config has none.
+fn tunnel_target(cfg: &Config) -> (&str, &str) {
+    (
+        cfg.remote_ip.as_deref().unwrap_or(DEFAULT_WSTUNNEL_HOST),
+        cfg.wstunnel_remote_port
+            .as_deref()
+            .unwrap_or(DEFAULT_WSTUNNEL_PORT),
+    )
 }
 
 /// Wait until something has bound the local UDP `port`, i.e. wstunnel's tunnel
@@ -351,7 +297,7 @@ fn wait_for_udp_port(port: u16, timeout: Duration) -> Result<(), String> {
 /// out + `remove_interface` on `down` frees it cleanly.
 struct Daemon {
     wgapi: Option<WGApi<defguard_wireguard_rs::Kernel>>,
-    wstunnel: Option<std::process::Child>,
+    tunnel: Option<Tunnel>,
     // Runs the slow WireGuardNT adapter teardown off the ctrl-handler thread
     // so `down()` (and hence UI disconnect) returns fast. `up()` joins any
     // in-flight teardown before creating a fresh interface, so the two never
@@ -366,7 +312,7 @@ impl Default for Daemon {
     fn default() -> Self {
         Self {
             wgapi: None,
-            wstunnel: None,
+            tunnel: None,
             teardown: None,
             api_lock: Arc::new(Mutex::new(())),
         }
@@ -380,24 +326,28 @@ impl Daemon {
 
     fn up(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let cfg = load_config()?;
+        let (host, port) = tunnel_target(&cfg);
+
         if self.is_up() {
             log("up: already up");
-            // The adapter is up. If the tunnel child died since then, restart it
-            // so a retry can actually reconnect instead of "already up" but dead.
-            if let Some(child) = self.wstunnel.as_mut() {
-                if child.try_wait().ok().flatten().is_some() {
-                    log("up: wstunnel died, restarting");
-                    let new_child = start_wstunnel(&cfg).map_err(|e| {
-                        let msg = format!("wstunnel restart failed: {e}");
+            // If the in-process tunnel stopped on its own, restart it so a retry
+            // can reconnect instead of reporting "already up" while dead.
+            if let Some(tunnel) = &self.tunnel {
+                if tunnel.is_finished() {
+                    log("up: tunnel stopped, restarting");
+                    let new_tunnel = Tunnel::start(host, port).map_err(|e| {
+                        let msg = format!("tunnel restart failed: {e}");
                         log(&msg);
                         msg
                     })?;
-                    self.wstunnel = Some(new_child);
-                    log("up: wstunnel restarted");
+                    self.tunnel = Some(new_tunnel);
+                    wait_for_udp_port(TUNNEL_PORT, Duration::from_secs(20))?;
+                    log("up: tunnel restarted");
                 }
             }
             return Ok(());
         }
+
         let _api_guard = match self.api_lock.lock() {
             Ok(g) => g,
             Err(p) => p.into_inner(),
@@ -405,27 +355,18 @@ impl Daemon {
         let start = Instant::now();
         log("up: start");
 
-        // If a previous `down` is still tearing down the WireGuardNT adapter
-        // in the background, wait for it so we don't race the create below.
-        // The teardown usually has a head start (disconnect happened earlier),
-        // so this rarely blocks for long.
+        // Wait for any background WireGuard teardown before creating a fresh interface.
         if let Some(t) = self.teardown.take() {
             let _ = t.join();
             log("up: waited for previous teardown");
         }
 
-        // Reap our own stale child handle if a previous `up` died part-way.
-        // Kill but don't block on `wait()` (wstunnel exits slowly); the
-        // `kill_stale_wstunnel()` force-kill below handles any remainder.
-        if let Some(mut child) = self.wstunnel.take() {
-            let _ = child.kill();
-            drop(child);
-            log("up: cleaned stale wstunnel handle");
+        // Abort any leftover in-process tunnel from a partial startup.
+        if let Some(tunnel) = self.tunnel.take() {
+            tunnel.stop();
+            log("up: stopped stale tunnel handle");
         }
 
-        // Make sure no leftover wstunnel or WireGuard adapter is still around
-        // from a previous session before bringing the tunnel up fresh.
-        kill_stale_wstunnel();
         cleanup_stale_interface();
 
         let name = ifname();
@@ -435,32 +376,24 @@ impl Daemon {
         #[cfg(target_os = "macos")]
         let mut wgapi = WGApi::<defguard_wireguard_rs::Userspace>::new(name.clone())?;
 
-        wgapi.create_interface()?;
-        log(&format!("up: interface created in {:?}", start.elapsed()));
-
-        // Start wstunnel BEFORE configuring the interface. Its local UDP
-        // tunnel endpoint (TUNNEL_PORT) only gets bound once its WebSocket
-        // connection to the remote server is up, which is the slow part.
-        // Spawning it first lets that happen while we prepare the adapter;
-        // then `wait_for_udp_port` makes sure the endpoint is listening before
-        // we configure the WireGuard peer. Otherwise the first handshake
-        // fires into an unbound port, fails, and WireGuard backs off
-        // ~1s, 2s, 4s... which is what made connecting take ~5-6s.
-        match start_wstunnel(&cfg) {
-            Ok(child) => {
-                self.wstunnel = Some(child);
-                log(&format!("up: wstunnel started in {:?}", start.elapsed()));
+        // Start the embedded wstunnel client before configuring peers so the
+        // WebSocket handshake runs while we build the WireGuard configuration.
+        match Tunnel::start(host, port) {
+            Ok(tunnel) => {
+                self.tunnel = Some(tunnel);
+                log(&format!("up: tunnel started in {:?}", start.elapsed()));
             }
             Err(e) => {
-                log(&format!("up: wstunnel failed to start: {e}"));
-                // Roll back so a retry brings everything up from scratch instead
-                // of leaving us in an "already up" state that never connects.
+                log(&format!("up: tunnel failed to start: {e}"));
                 if let Err(re) = wgapi.remove_interface() {
                     log(&format!("up: rollback remove_interface failed: {re}"));
                 }
                 return Err(e.into());
             }
         }
+
+        wgapi.create_interface()?;
+        log(&format!("up: interface created in {:?}", start.elapsed()));
 
         let mut peers = Vec::new();
         for p in &cfg.peers {
@@ -498,16 +431,19 @@ impl Daemon {
             fwmark: None,
         };
 
-        // Block until wstunnel's tunnel endpoint is actually listening. If the
-        // tunnel never comes up, fail loudly instead of silently never
-        // handshaking (and roll everything back).
-        wait_for_udp_port(TUNNEL_PORT, Duration::from_secs(20)).map_err(|e| {
+        // Block until wstunnel binds TUNNEL_PORT. If it times out (or the tunnel
+        // thread aborted early), roll back both the tunnel and interface cleanly.
+        if let Err(e) = wait_for_udp_port(TUNNEL_PORT, Duration::from_secs(20)) {
             log(&format!(
                 "up: tunnel port {TUNNEL_PORT} not ready after {:?}: {e}",
                 start.elapsed()
             ));
-            e
-        })?;
+            if let Some(tunnel) = self.tunnel.take() {
+                tunnel.stop();
+            }
+            let _ = wgapi.remove_interface();
+            return Err(e.into());
+        }
         log(&format!("up: tunnel port ready in {:?}", start.elapsed()));
 
         wgapi.configure_interface(&interface_config)?;
@@ -527,8 +463,6 @@ impl Daemon {
             log(&format!("up: dns configured in {:?}", start.elapsed()));
         }
 
-        // Keep the api handle alive for the lifetime of this daemon process so
-        // the WireGuardNT adapter persists while we are "up".
         self.wgapi = Some(wgapi);
 
         log(&format!("up: done in {:?}", start.elapsed()));
@@ -543,31 +477,16 @@ impl Daemon {
         let start = Instant::now();
         log("down: start");
 
-        // Kill wstunnel by its own handle, but don't block on `wait()` —
-        // wstunnel can take ~4s to fully exit. The next `up()` force-kills
-        // any lingering wstunnel by name, so detaching here keeps `down()`
-        // (and thus UI disconnect -> reconnect) fast.
-        let wstunnel_killed = if let Some(mut child) = self.wstunnel.take() {
+        if let Some(tunnel) = self.tunnel.take() {
+            tunnel.stop();
             log(&format!(
-                "down: wstunnel child killed (elapsed {:?})",
+                "down: tunnel stopped (elapsed {:?})",
                 start.elapsed()
             ));
-            let _ = child.kill();
-            drop(child);
-            true
         } else {
-            log("down: no wstunnel child to kill");
-            false
-        };
+            log("down: no active tunnel to stop");
+        }
 
-        // Remove the interface now that we hold its api handle. WireGuardNT
-        // adapter teardown (closing the adapter) can take ~4s, so run it on a
-        // background thread and return to the client immediately — this is what
-        // makes disconnect -> reconnect feel instant. The teardown thread
-        // re-acquires `api_lock` for its whole duration so the status reader
-        // cannot `get_config` on the adapter while it's being closed (which
-        // would otherwise race and panic). `up()` joins this thread before
-        // recreating the adapter, so create never races it either.
         let interface_removed = if let Some(wgapi) = self.wgapi.take() {
             log(&format!(
                 "down: removing interface (elapsed {:?})",
@@ -590,17 +509,8 @@ impl Daemon {
             false
         };
 
-        // Safety net: clear any orphaned wstunnel/adapter left by a crashed
-        // daemon that we never owned a handle to. When we just tore down our
-        // own resources cleanly this is redundant, and the create+remove probe
-        // in `cleanup_stale_interface` is slow (~1s), which made a quick
-        // disconnect -> reconnect feel unresponsive. Only fall through to it
-        // when something was already missing.
         if !interface_removed {
             cleanup_stale_interface();
-        }
-        if !wstunnel_killed {
-            kill_stale_wstunnel();
         }
 
         log(&format!("down: done in {:?}", start.elapsed()));
@@ -1234,6 +1144,8 @@ fn main() -> ExitCode {
     // process may be started by the Service Control Manager, a scheduled task,
     // or the installer, all of which set the CWD to something unrelated, so we
     // pin the working directory to the directory containing this executable.
+    init_logging();
+
     if let Ok(dir) = exe_dir() {
         let _ = std::env::set_current_dir(&dir);
     }
