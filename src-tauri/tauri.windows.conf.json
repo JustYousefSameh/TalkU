@@ -1,6 +1,9 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "bundle": {
-    "externalBin": ["binaries/talku-cli"]
+    "externalBin": ["binaries/talku-cli"],
+    "resources": {
+      "assets/wireguard-amd64.dll": "resources-windows/binaries/wireguard-amd64.dll"
+    }
   }
 }
