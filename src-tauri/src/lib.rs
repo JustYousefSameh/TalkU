@@ -275,7 +275,7 @@ async fn is_daemon_alive() -> Result<(), String> {
 /// `pong`.
 #[cfg(windows)]
 async fn ensure_daemon() -> Result<(), String> {
-    if is_daemon_alive().await {
+    if is_daemon_alive().await.is_ok() {
         return Ok(());
     }
 
@@ -286,7 +286,7 @@ async fn ensure_daemon() -> Result<(), String> {
     let _gate = STARTING.lock().await;
 
     // Re-check under the gate in case someone else already started it.
-    if is_daemon_alive().await {
+    if is_daemon_alive().await.is_ok() {
         return Ok(());
     }
 
@@ -306,7 +306,7 @@ async fn ensure_daemon() -> Result<(), String> {
     }
 
     for _ in 0..50 {
-        if is_daemon_alive().await {
+        if is_daemon_alive().await.is_ok() {
             return Ok(());
         }
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
