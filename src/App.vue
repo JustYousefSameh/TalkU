@@ -2,6 +2,7 @@
 import { ref, watch, onMounted, onUnmounted } from "vue";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
+import { HeartHandshake } from "lucide-vue-next";
 import AppBar from "./AppBar.vue";
 import CustomSliderButton from "./CustomSliderButton.vue";
 import SocialLink from "./SocialLink.vue";
@@ -38,6 +39,16 @@ function onSliderError(message: string) {
         showCancel: true,
         onConfirm: () => sliderRef.value?.retryLastAction(),
     });
+}
+
+async function openCommunityFund() {
+    try {
+        await invoke("plugin:opener|open_url", {
+            url: "https://talku-funds.pages.dev/",
+        });
+    } catch (error) {
+        console.error("Failed to open Community Fund website:", error);
+    }
 }
 
 let audio: HTMLAudioElement | null = null;
@@ -122,6 +133,7 @@ onUnmounted(() => {
                 @confirm="boxConfirm()"
                 @cancel="boxHide()"
             />
+
             <div class="socials">
                 <SocialLink
                     image="/discord.png"
@@ -133,6 +145,16 @@ onUnmounted(() => {
                     alt="GitHub"
                     link="https://github.com/JustYousefSameh/TalkU"
                 />
+
+                <button
+                    class="fund-link"
+                    type="button"
+                    aria-label="Community Fund"
+                    title="Community Fund"
+                    @click="openCommunityFund"
+                >
+                    <HeartHandshake :size="30" :stroke-width="1.8" />
+                </button>
             </div>
         </div>
     </main>
@@ -179,8 +201,34 @@ body {
     left: 16px;
     bottom: 16px;
     display: flex;
+    align-items: center;
     gap: 12px;
     animation: slide-up 0.6s ease-out both;
+}
+
+.fund-link {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    padding: 0;
+    border: none;
+    background: transparent;
+    color: rgba(255, 255, 255, 0.9);
+    cursor: pointer;
+    transition:
+        transform 0.2s ease,
+        color 0.2s ease;
+}
+
+.fund-link:hover {
+    color: #4ade80;
+    transform: scale(1.1);
+}
+
+.fund-link:active {
+    transform: scale(0.95);
 }
 
 @keyframes slide-up {
@@ -188,6 +236,7 @@ body {
         transform: translateY(30px);
         opacity: 0;
     }
+
     to {
         transform: translateY(0);
         opacity: 1;

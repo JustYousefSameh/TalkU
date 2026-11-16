@@ -1,0 +1,37 @@
+name: Build TalkU for Windows
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feature/game-store-detection-v3.0.1
+      - experiment/general-voip-routing
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v5
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install frontend dependencies
+        run: bun ci
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build TalkU
+        uses: tauri-apps/tauri-action@action-v1.0.0
+
+      - name: Upload Windows installers
+        uses: actions/upload-artifact@v6
+        with:
+          name: TalkU-Windows
+          path: |
+            target/release/bundle/nsis/*.exe
+            target/release/bundle/msi/*.msi
+          if-no-files-found: error
