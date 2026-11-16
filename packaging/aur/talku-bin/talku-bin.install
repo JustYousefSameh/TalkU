@@ -72,6 +72,12 @@ post_install() {
   if ! systemctl is-enabled --quiet talku-cli.service 2>/dev/null; then
     echo ">>> Start the daemon with: systemctl enable --now talku-cli"
   fi
+
+  # NetworkManager must not assume wg0 (see 99-talku-unmanaged.conf); reload
+  # rather than restart so active connections are not interrupted.
+  if systemctl is-active --quiet NetworkManager 2>/dev/null; then
+    systemctl reload NetworkManager 2>/dev/null || true
+  fi
 }
 
 post_upgrade() {

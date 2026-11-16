@@ -68,7 +68,9 @@ if [ "$MODE" = uninstall ]; then
     echo "==> stopping and removing TalkU"
     sh "$ROOT/linux/prerm.sh"
     rm -f "$UNIT_PATH"
+    rm -f /etc/NetworkManager/conf.d/99-talku-unmanaged.conf
     systemctl daemon-reload 2>/dev/null || true
+    systemctl reload NetworkManager 2>/dev/null || true
     sh "$ROOT/linux/postrm.sh" purge
     echo "done (state in /var/lib/talku and files in /opt/talku removed)"
     exit 0
@@ -89,6 +91,14 @@ echo "==> installing into $DAEMON_DIR"
 install -d -m 0755 -o root -g root "$DAEMON_DIR"
 install -m 0755 -o root -g root "$DAEMON_SRC" "$DAEMON_DIR/talku-cli"
 install -Dm 0644 -o root -g root "$ROOT/linux/talku-cli.service" "$UNIT_PATH"
+
+# 2b. Keep NetworkManager from assuming wg0. Otherwise NM turns the interface
+#     into a VPN connection and GNOME alerts "Activation of network connection
+#     failed" when the daemon removes it on disconnect.
+if [ -d /etc/NetworkManager/conf.d ]; then
+    install -Dm 0644 -o root -g root "$ROOT/linux/99-talku-unmanaged.conf" \
+        /etc/NetworkManager/conf.d/99-talku-unmanaged.conf
+fi
 
 # 3. Group, state dir, systemd registration — shared with the package scripts.
 sh "$ROOT/linux/postinst.sh"

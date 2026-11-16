@@ -42,6 +42,11 @@ package() {
   # /opt/talku/talku-cli (wstunnel is linked into the daemon).
   cp -a "$src/usr" "$src/opt" "$pkgdir/"
 
+  # /etc carries the NetworkManager rule that keeps NM from assuming wg0.
+  if [ -d "$src/etc" ]; then
+    cp -a "$src/etc" "$pkgdir/"
+  fi
+
   # Arch keeps vendor units in /usr/lib/systemd/system; the .deb uses /lib.
   install -Dm644 "$src/lib/systemd/system/talku-cli.service" \
     "$pkgdir/usr/lib/systemd/system/talku-cli.service"

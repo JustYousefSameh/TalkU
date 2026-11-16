@@ -16,6 +16,7 @@ and `.rpm` users get.
 | `/usr/bin/talku` | desktop app |
 | `/opt/talku/talku-cli` | daemon (wstunnel linked in-process) |
 | `/usr/lib/systemd/system/talku-cli.service` | systemd unit |
+| `/etc/NetworkManager/conf.d/99-talku-unmanaged.conf` | keeps NetworkManager from managing `wg0` |
 | `/usr/share/applications/TalkU.desktop`, `/usr/share/icons/hicolor/...` | menu entry and icons |
 | `/usr/lib/TalkU/resources/*.wav` | connection audio cues |
 

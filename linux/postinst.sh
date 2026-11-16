@@ -100,6 +100,13 @@ if command -v systemctl >/dev/null 2>&1; then
     else
         systemctl enable --now "$UNIT" || true
     fi
+
+    # 6. NetworkManager must not assume wg0 (see 99-talku-unmanaged.conf);
+    #    reload rather than restart so active connections are not interrupted.
+    if [ -f /etc/NetworkManager/conf.d/99-talku-unmanaged.conf ] &&
+        systemctl is-active --quiet NetworkManager 2>/dev/null; then
+        systemctl reload NetworkManager || true
+    fi
 fi
 
 exit 0
