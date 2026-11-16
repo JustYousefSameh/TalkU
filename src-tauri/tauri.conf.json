@@ -52,7 +52,9 @@
         "postRemoveScript": "../linux/postrm.sh"
       }
     },
-    "resources": ["resources/*"],
+    "resources": {
+      "resources/*": "./"
+    },
     "active": true,
     "targets": ["deb", "rpm", "nsis"],
     "icon": [
