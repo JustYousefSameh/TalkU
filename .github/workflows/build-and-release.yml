@@ -6,7 +6,7 @@ name: Build and Release
 on:
   push:
     branches:
-      - linux-port # Remove this block once merged into main
+      - linux_port
   release:
     types: [published]
   workflow_dispatch:
