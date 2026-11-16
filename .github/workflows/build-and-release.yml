@@ -6,7 +6,7 @@ name: Build and Release
 on:
   push:
     branches:
-      - linux_port
+      - linux-port # Remove this block once merged into main
   release:
     types: [published]
   workflow_dispatch:
@@ -42,7 +42,7 @@ jobs:
       - name: Install frontend dependencies
         run: bun install --frozen-lockfile
 
-      - name: Build talku-cli daemon
+      - name: Build and stage talku-cli daemon
         run: bun run prepare:linux
 
       - name: Build deb and rpm
@@ -96,8 +96,12 @@ jobs:
       - name: Install frontend dependencies
         run: bun install --frozen-lockfile
 
-      - name: Build talku-cli.exe daemon
-        run: cargo build --release -p talku-cli
+      - name: Build and stage talku-cli.exe daemon
+        shell: pwsh
+        run: |
+          cargo build --release -p talku-cli
+          New-Item -ItemType Directory -Force -Path src-tauri/resources | Out-Null
+          Copy-Item target/release/talku-cli.exe src-tauri/resources/talku-cli.exe -Force
 
       - name: Build Windows installer
         run: bun run tauri build --bundles nsis
