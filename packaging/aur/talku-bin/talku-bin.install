@@ -2,6 +2,58 @@
 # maintainer scripts do, minus the auto-enable (Arch expects services to be
 # enabled explicitly).
 
+# Users with a local desktop login. pacman usually runs under sudo, which
+# exports SUDO_USER, but graphical frontends (pamac, Discover) may not.
+_talku_desktop_users() {
+  command -v loginctl >/dev/null 2>&1 || return 0
+  loginctl list-sessions --no-legend 2>/dev/null | while read -r sid _rest; do
+    case "$sid" in '' | *[!0-9]*) continue ;; esac
+    props=$(loginctl show-session "$sid" 2>/dev/null) || continue
+    printf '%s\n' "$props" | grep -qx 'Remote=no' || continue
+    printf '%s\n' "$props" | grep -qx 'Class=user' || continue
+    printf '%s\n' "$props" | sed -n 's/^Name=//p'
+  done | sort -u
+}
+
+_talku_add_to_group() {
+  local user=$1
+  [ -n "$user" ] || return 0
+  [ "$user" = root ] && return 0
+  if id -nG "$user" 2>/dev/null | tr ' ' '\n' | grep -qx talku; then
+    return 0
+  fi
+  if usermod -aG talku "$user"; then
+    echo ">>> Added '$user' to the 'talku' group."
+    TALKU_GROUP_CHANGED=1
+  else
+    echo ">>> Could not add '$user' to the 'talku' group." >&2
+  fi
+}
+
+_talku_add_desktop_user() {
+  local install_users=""
+  if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ]; then
+    install_users="$SUDO_USER"
+  else
+    install_users=$(_talku_desktop_users)
+  fi
+
+  TALKU_GROUP_CHANGED=0
+  local user
+  for user in $install_users; do
+    _talku_add_to_group "$user"
+  done
+
+  if [ "$TALKU_GROUP_CHANGED" -eq 1 ]; then
+    echo ">>> Log out and back in (or reboot) before starting TalkU so your"
+    echo ">>> desktop session picks up the new group."
+  elif [ -z "$install_users" ]; then
+    echo ">>> Could not determine your desktop user automatically."
+    echo ">>> Add it with: sudo usermod -aG talku \"\$USER\""
+    echo ">>> then log out and back in before starting TalkU."
+  fi
+}
+
 post_install() {
   # Shared group: the root daemon and the desktop app (run by the user) both
   # rely on it for /run/talku/talku-cli.sock and /var/lib/talku/talkuwg.conf.
@@ -13,13 +65,7 @@ post_install() {
   # and the files it creates keep the talku group.
   install -d -m 2770 -o root -g talku /var/lib/talku
 
-  if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ]; then
-    if ! id -nG "$SUDO_USER" 2>/dev/null | tr ' ' '\n' | grep -qx talku; then
-      usermod -aG talku "$SUDO_USER" || true
-      echo ">>> Added '$SUDO_USER' to the 'talku' group."
-      echo ">>> Log out and back in before starting TalkU."
-    fi
-  fi
+  _talku_add_desktop_user
 
   systemctl daemon-reload 2>/dev/null || true
 
@@ -29,7 +75,9 @@ post_install() {
 }
 
 post_upgrade() {
-  systemctl daemon-reload 2>/dev/null || true
+  # Re-run the install setup so upgrades also add the desktop user to the
+  # 'talku' group.
+  post_install "$@"
   # Restart the daemon only if it was running, so a disabled service stays
   # disabled and a stopped one stays stopped.
   systemctl try-restart talku-cli.service 2>/dev/null || true

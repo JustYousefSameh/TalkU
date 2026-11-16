@@ -180,8 +180,11 @@ async fn open_pipe() -> Result<interprocess::local_socket::tokio::Stream, String
             ),
             (true, ErrorKind::PermissionDenied) => format!(
                 "Permission denied connecting to {display}. Your user is not in the 'talku' group.\n\n\
-                 Run the app from a shell that has the group active:\n  newgrp talku\n  bun run tauri dev\n\n\
-                 Or log out and back in. Check with:\n  id -nG | tr ' ' '\\n' | grep -x talku"
+                 The group is created when TalkU is installed, but a desktop session that\n\
+                 was already running keeps its old group list until you log out.\n\n\
+                 If logging out and back in does not fix it, add yourself, then log in again:\n  \
+                 sudo usermod -aG talku \"$USER\"\n\n\
+                 Verify in the new session:\n  id -nG | tr ' ' '\\n' | grep -x talku"
             ),
             _ => format!("Failed to connect to {display}: {e}"),
         }

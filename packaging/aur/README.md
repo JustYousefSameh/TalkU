@@ -20,8 +20,10 @@ and `.rpm` users get.
 | `/usr/lib/TalkU/resources/*.wav` | connection audio cues |
 
 `talku-bin.install` creates the `talku` group, `/var/lib/talku` (2770,
-setgid), adds the invoking user to the group, and on removal stops and disables
-the unit. It does not enable the service — Arch expects that to be explicit:
+setgid) and adds the installing desktop user to the group — including when it
+is installed from a graphical frontend that does not export `SUDO_USER`. On
+removal it stops and disables the unit. It does not enable the service — Arch
+expects that to be explicit:
 
 ```sh
 systemctl enable --now talku-cli
