@@ -12,19 +12,20 @@
   ExecShell "runas" '"$EXEPATH"'
   Quit
 
-  ; Clear any leftover per-user install/data in %LOCALAPPDATA%\TalkU so a fresh
-  ; install doesn't conflict with stale per-user files/registry.
-  ; RMDir /r removes recursively.
+  ; 1. Stop and remove any previously-installed TalkUCLI service FIRST so
+  ;    talku-cli.exe releases all file locks before we delete or overwrite files.
+  ;    `net stop` waits synchronously for the service to stop (unlike `sc stop`),
+  ;    and `taskkill` ensures any lingering process is terminated immediately.
+  nsExec::ExecToLog 'net stop TalkUCLI'
+  nsExec::ExecToLog 'taskkill /F /IM talku-cli.exe /T'
+  Sleep 500
+  nsExec::ExecToLog 'sc delete TalkUCLI'
+
+  ; 2. Now that the service process is closed and files are unlocked, clear any
+  ;    leftover per-user install/data in %LOCALAPPDATA%\TalkU.
   ${If} ${FileExists} "$LOCALAPPDATA\TalkU"
     RMDir /r "$LOCALAPPDATA\TalkU"
   ${EndIf}
-
-  ; Stop and remove any previously-installed TalkUCLI service. A running old
-  ; service would lock talku-cli.exe and prevent this installer from
-  ; overwriting it, and re-registering below needs a clean slate anyway.
-  ; (These are no-ops/fail silently when no service exists yet.)
-  nsExec::ExecToLog 'sc stop TalkUCLI'
-  nsExec::ExecToLog 'sc delete TalkUCLI'
 
 !macroend
 
@@ -43,5 +44,16 @@
 
   ; Friendly description shown in services.msc.
   nsExec::ExecToLog 'sc description TalkUCLI "TalkU elevated daemon service run by the TalkU desktop app"'
+
+!macroend
+
+!macro NSIS_HOOK_PREUNINSTALL
+
+  ; Stop and unregister the TalkUCLI service before the uninstaller removes files
+  ; from $INSTDIR so talku-cli.exe and wireguard-amd64.dll are not locked.
+  nsExec::ExecToLog 'net stop TalkUCLI'
+  nsExec::ExecToLog 'taskkill /F /IM talku-cli.exe /T'
+  Sleep 500
+  nsExec::ExecToLog 'sc delete TalkUCLI'
 
 !macroend
