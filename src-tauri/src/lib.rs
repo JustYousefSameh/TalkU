@@ -179,7 +179,9 @@ async fn open_pipe() -> Result<interprocess::local_socket::tokio::Stream, String
                  If that fails, check:\n  systemctl status talku-cli\n  journalctl -u talku-cli -e"
             ),
             (true, ErrorKind::PermissionDenied) => format!(
-                "Permission denied connecting to {display}. Your user is not in the 'talku' group; log out and back in after installing TalkU, then retry."
+                "Permission denied connecting to {display}. Your user is not in the 'talku' group.\n\n\
+                 Run the app from a shell that has the group active:\n  newgrp talku\n  bun run tauri dev\n\n\
+                 Or log out and back in. Check with:\n  id -nG | tr ' ' '\\n' | grep -x talku"
             ),
             _ => format!("Failed to connect to {display}: {e}"),
         }

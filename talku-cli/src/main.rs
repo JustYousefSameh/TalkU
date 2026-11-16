@@ -779,7 +779,9 @@ fn create_socket_listener() -> std::io::Result<interprocess::local_socket::tokio
             let old_mask = unsafe { libc::umask(0) };
 
             let name = path.as_path().to_fs_name::<GenericFilePath>()?;
-            let result = ListenerOptions::new().name(name).mode(0660).create_tokio();
+            // `0o660`, not `0660`: Rust parses a leading zero as decimal, so
+            // `0660` would mean decimal 660 (octal 1224) and lock the app out.
+            let result = ListenerOptions::new().name(name).mode(0o660).create_tokio();
 
             // Restore the old umask
             #[cfg(unix)]
@@ -791,7 +793,7 @@ fn create_socket_listener() -> std::io::Result<interprocess::local_socket::tokio
             #[cfg(unix)]
             if result.is_ok() {
                 use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0660));
+                let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o660));
             }
 
             result
