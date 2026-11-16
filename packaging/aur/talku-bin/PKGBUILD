@@ -39,8 +39,7 @@ package() {
   bsdtar -xf "$src"/data.tar.* -C "$src"
 
   # usr/bin/talku, the desktop entry, icons and sound resources, plus
-  # /opt/talku/{talku-cli,talku-wstunnel} — the daemon resolves its wstunnel
-  # sibling from its own directory before ever looking at PATH.
+  # /opt/talku/talku-cli (wstunnel is linked into the daemon).
   cp -a "$src/usr" "$src/opt" "$pkgdir/"
 
   # Arch keeps vendor units in /usr/lib/systemd/system; the .deb uses /lib.

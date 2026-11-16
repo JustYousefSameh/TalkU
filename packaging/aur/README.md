@@ -2,9 +2,10 @@
 
 `packaging/aur/talku-bin` is the source of the AUR package `talku-bin`. It does
 not build anything: it unpacks the upstream `.deb` from the GitHub release and
-installs the desktop app, the root daemon and the pinned `wstunnel` next to it.
+installs the desktop app and the root daemon. wstunnel is linked into the
+daemon, so there is no separate executable to install.
 
-The `.deb` is produced by `.github/workflows/linux-packages.yml` whenever a
+The `.deb` is produced by `.github/workflows/build-and-release.yml` whenever a
 release is published, so the release asset is always the same build the `.deb`
 and `.rpm` users get.
 
@@ -13,8 +14,7 @@ and `.rpm` users get.
 | Path | Source |
 | --- | --- |
 | `/usr/bin/talku` | desktop app |
-| `/opt/talku/talku-cli` | daemon |
-| `/opt/talku/talku-wstunnel` | pinned wstunnel 10.5.1 |
+| `/opt/talku/talku-cli` | daemon (wstunnel linked in-process) |
 | `/usr/lib/systemd/system/talku-cli.service` | systemd unit |
 | `/usr/share/applications/TalkU.desktop`, `/usr/share/icons/hicolor/...` | menu entry and icons |
 | `/usr/lib/TalkU/resources/*.wav` | connection audio cues |

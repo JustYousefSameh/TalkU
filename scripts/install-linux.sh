@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # Install (or remove) TalkU's Linux runtime without a package manager:
 #
-#   /opt/talku/talku-cli         elevated daemon
-#   /opt/talku/talku-wstunnel    pinned wstunnel client (sibling lookup)
+#   /opt/talku/talku-cli         elevated daemon (wstunnel is linked in-process)
 #   /etc/systemd/system/talku-cli.service
 #
 # Equivalent to installing the .deb/.rpm on systems without dpkg/rpm (Arch,
@@ -16,7 +15,6 @@ SERVICE=talku-cli.service
 
 MODE=install
 DAEMON_SRC=""
-WSTUNNEL_SRC=""
 BUILD=1
 
 usage() {
@@ -24,7 +22,6 @@ usage() {
 usage: sudo scripts/install-linux.sh [options]
 
   --daemon PATH     install this talku-cli instead of building it
-  --wstunnel PATH   install this wstunnel (default: $WSTUNNEL_BIN or PATH)
   --no-build        do not run cargo (requires --daemon)
   --uninstall       stop the service and remove the installed files
   -h, --help        show this help
@@ -44,11 +41,6 @@ while [ $# -gt 0 ]; do
     --daemon)
         [ $# -ge 2 ] || die "--daemon needs a path"
         DAEMON_SRC="$2"
-        shift 2
-        ;;
-    --wstunnel)
-        [ $# -ge 2 ] || die "--wstunnel needs a path"
-        WSTUNNEL_SRC="$2"
         shift 2
         ;;
     --no-build)
@@ -82,7 +74,7 @@ if [ "$MODE" = uninstall ]; then
     exit 0
 fi
 
-# 1. Resolve the two binaries.
+# 1. Resolve the daemon binary.
 if [ -n "$DAEMON_SRC" ]; then
     [ -x "$DAEMON_SRC" ] || die "--daemon: '$DAEMON_SRC' is not executable"
 else
@@ -92,24 +84,10 @@ else
     DAEMON_SRC="$ROOT/target/release/talku-cli"
 fi
 
-if [ -z "$WSTUNNEL_SRC" ]; then
-    if [ -n "${WSTUNNEL_BIN:-}" ]; then
-        WSTUNNEL_SRC="$WSTUNNEL_BIN"
-    elif command -v wstunnel >/dev/null 2>&1; then
-        WSTUNNEL_SRC="$(command -v wstunnel)"
-    else
-        die "no wstunnel found: pass --wstunnel PATH or install wstunnel first
-       (see https://github.com/erebe/wstunnel/releases)"
-    fi
-fi
-[ -x "$WSTUNNEL_SRC" ] || die "'$WSTUNNEL_SRC' is not executable"
-
-# 2. Lay the files down next to each other: the daemon finds its wstunnel by
-#    looking in its own directory before falling back to PATH.
+# 2. Install the daemon and its systemd unit.
 echo "==> installing into $DAEMON_DIR"
 install -d -m 0755 -o root -g root "$DAEMON_DIR"
 install -m 0755 -o root -g root "$DAEMON_SRC" "$DAEMON_DIR/talku-cli"
-install -m 0755 -o root -g root "$WSTUNNEL_SRC" "$DAEMON_DIR/talku-wstunnel"
 install -Dm 0644 -o root -g root "$ROOT/linux/talku-cli.service" "$UNIT_PATH"
 
 # 3. Group, state dir, systemd registration — shared with the package scripts.
@@ -118,7 +96,6 @@ sh "$ROOT/linux/postinst.sh"
 echo
 echo "installed:"
 echo "  $DAEMON_DIR/talku-cli"
-echo "  $DAEMON_DIR/talku-wstunnel"
 echo "  $UNIT_PATH"
 systemctl --no-pager --lines=0 status "$SERVICE" 2>/dev/null || true
 echo

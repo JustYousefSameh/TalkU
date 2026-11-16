@@ -22,11 +22,15 @@ fi
 #    talku group.
 install -d -m 2770 -o root -g talku "$STATE_DIR"
 
-# 3. The bundle carries the binaries with their build-time mode; force the
-#    layout the daemon expects (and keep them root-owned so the non-root app
-#    cannot swap what the root service executes).
-chown root:root "$DAEMON_DIR/talku-cli" "$DAEMON_DIR/talku-wstunnel"
-chmod 0755 "$DAEMON_DIR/talku-cli" "$DAEMON_DIR/talku-wstunnel"
+# 3. The bundle carries the daemon with its build-time mode; force the layout
+#    the service expects (and keep it root-owned so the non-root app cannot
+#    swap what the root service executes).
+if [ ! -x "$DAEMON_DIR/talku-cli" ]; then
+    echo "TalkU: missing $DAEMON_DIR/talku-cli" >&2
+    exit 1
+fi
+chown root:root "$DAEMON_DIR/talku-cli"
+chmod 0755 "$DAEMON_DIR/talku-cli"
 
 # 4. Let the user who ran the install reach the daemon. dpkg/rpm leave
 #    SUDO_USER in the environment when installed through sudo.

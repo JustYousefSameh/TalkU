@@ -159,12 +159,31 @@ async fn open_pipe() -> Result<interprocess::local_socket::tokio::Stream, String
 
     let path = socket_path();
     let display = path.display().to_string();
+    let is_packaged_socket = path.as_path() == std::path::Path::new(DEFAULT_SOCKET_PATH);
     let name = path
         .to_fs_name::<GenericFilePath>()
         .map_err(|e| format!("Invalid socket path {display}: {e}"))?;
-    Stream::connect(name)
-        .await
-        .map_err(|e| format!("Failed to connect to {display}: {e}"))
+    Stream::connect(name).await.map_err(|e| {
+        use std::io::ErrorKind;
+
+        match (is_packaged_socket, e.kind()) {
+            (true, ErrorKind::NotFound) => format!(
+                "TalkU's background service is not running (no socket at {display}).\n\n\
+                 Start it with:\n  sudo systemctl enable --now talku-cli\n\n\
+                 If it is already running, check:\n  systemctl status talku-cli\n  journalctl -u talku-cli -e\n\n\
+                 After a fresh install, log out and back in so your user is in the 'talku' group, then retry."
+            ),
+            (true, ErrorKind::ConnectionRefused) => format!(
+                "TalkU's background service is not accepting connections at {display}.\n\n\
+                 Restart it with:\n  sudo systemctl restart talku-cli\n\n\
+                 If that fails, check:\n  systemctl status talku-cli\n  journalctl -u talku-cli -e"
+            ),
+            (true, ErrorKind::PermissionDenied) => format!(
+                "Permission denied connecting to {display}. Your user is not in the 'talku' group; log out and back in after installing TalkU, then retry."
+            ),
+            _ => format!("Failed to connect to {display}: {e}"),
+        }
+    })
 }
 
 #[cfg(windows)]
